@@ -31,9 +31,8 @@
    - Produz arquivos DOCX e JSON por docente em `backend/exports/output/<accreditation>/`.
 
 ## Lógica de Acreditação
-- Regras de acreditação definidas em `ACCREDITATION_RULES` (janela de experiência, limites, versão do modelo).
-- Filtragem de experiência mantém vínculos dentro da janela configurada, considerando cargos em andamento mesmo sem data inicial explícita.
-- Produção acadêmica resumida com no mínimo cinco registros, respeitando os limites de cada acreditação; títulos vazios são descartados.
+- A definição de regras fica fora do código; a automação apenas recebe o nome da acreditação para organizar as saídas.
+- Todas as experiências e produções disponíveis são listadas integralmente quando existirem dados válidos.
 
 ## Solução de Problemas
 - Caso o esquema dos CSVs mude, atualize `CSV_SPECS` em [backend/core/database.py](backend/core/database.py#L19-L35) para ajustar o mapeamento das colunas.
@@ -41,5 +40,4 @@
 - Relatórios de execução (`run_<timestamp>.json`) documentam os docentes processados e os artefatos gerados.
 
 ## Próximos Passos
-- Ampliar a automação para outras acreditações (EQUIS, AMBA e ABET já possuem estrutura inicial).
 - Investigar testes automatizados para ingestão de dados e formatação dos documentos.

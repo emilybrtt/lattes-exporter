@@ -7,15 +7,14 @@ from dotenv import load_dotenv
 
 from .config import DATA_DIR, sqlite_path
 
-load_dotenv()
-
-
+load_dotenv() # Carrega variáveis de ambiente
 DB_PATH = sqlite_path()
 DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-connection: sqlite3.Connection | None = None
+connection: sqlite3.Connection | None = None 
 cursor: sqlite3.Cursor | None = None
 
+# Lista qual arquivo CSV deve alimentar qual tabela no SQLite
 CSV_SPECS = (
     {
         "filename": "base-de-dados-docente.csv",
@@ -30,12 +29,13 @@ CSV_SPECS = (
     {
         "filename": "producao_docentes_detalhado.csv",
         "table": "docentes_producao",
-        "skip_rows": 1,
+        "skip_rows": 1, # linha de metadados
     },
 )
 
 
 def _sanitize_columns(headers: list[str]) -> list[str]:
+    """Transforma os nomes das colunas em identificadores simples para o SQLite."""
     cleaned = []
     seen: set[str] = set()
     for index, header in enumerate(headers):
@@ -56,6 +56,7 @@ def _sanitize_columns(headers: list[str]) -> list[str]:
 def _load_csv_into_table(
     cur: sqlite3.Cursor, csv_path: Path, table_name: str, skip_rows: int = 0
 ) -> None:
+	"""Lê um CSV e insere seu conteúdo na tabela informada, pulando linhas extras se preciso."""
 	if not csv_path.exists():
 		print(f"Error loading {csv_path.name}: file not found.")
 		return
@@ -103,6 +104,7 @@ def _load_csv_into_table(
 
 
 def initialize_database() -> None:
+    """Carrega todos os CSVs configurados usando uma transação por arquivo"""
     if connection is None or cursor is None:
         print("Database connection is not available.")
         return
@@ -120,6 +122,7 @@ def initialize_database() -> None:
 
 
 try:
+    """ Conexão com o banco de dados """
     connection = sqlite3.connect(DB_PATH)
     cursor = connection.cursor()
     print(f"Connected to SQLite database at {DB_PATH}.")

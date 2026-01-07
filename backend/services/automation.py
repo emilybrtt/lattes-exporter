@@ -4,12 +4,13 @@ import argparse
 import json
 import logging
 import sqlite3
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Iterable, Sequence
 
 from docx import Document
+from docx.shared import Pt, Inches, RGBColor
 
 from backend.core.config import OUTPUT_DIR, sqlite_path
 
@@ -17,38 +18,9 @@ logger = logging.getLogger("cv_automation")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
-ACCREDITATION_RULES = {
-    "AACSB": {
-        "version": "2025.1",
-        "experience_years": 5,
-        "max_experience": 8,
-        "summary_limit": 1,
-    },
-    "EQUIS": {
-        "version": "2025.1",
-        "experience_years": 6,
-        "max_experience": 10,
-        "summary_limit": 1,
-    },
-    "AMBA": {
-        "version": "2025.1",
-        "experience_years": 5,
-        "max_experience": 6,
-        "summary_limit": 1,
-    },
-    "ABET": {
-        "version": "2025.1",
-        "experience_years": 7,
-        "max_experience": 10,
-        "summary_limit": 1,
-    },
-}
-
-TEMPLATE_VERSION = "2025.01"
-
-
 @dataclass
 class EducationRecord:
+    """Guarda um curso ou diploma do docente."""
     degree: str | None
     institution: str | None
     year: str | None
@@ -57,6 +29,7 @@ class EducationRecord:
 
 @dataclass
 class ExperienceEntry:
+    """Registra uma experiência profissional relevante."""
     role: str | None
     organization: str | None
     city: str | None
@@ -75,6 +48,7 @@ class ExperienceEntry:
 
 @dataclass
 class ProductionEntry:
+    """Resume uma produção acadêmica que vai para o CV."""
     year: str | None
     title: str | None
     production_type: str | None
@@ -86,8 +60,10 @@ class ProductionEntry:
     evidence_source: str | None
     lattes_info: str | None
 
+
 @dataclass
 class FacultyProfile:
+    """Reúne todas as informações consolidadas de um docente."""
     faculty_id: str
     name: str
     email: str | None
@@ -214,11 +190,10 @@ class CVAutomation:
         self.output_root.mkdir(parents=True, exist_ok=True)
 
     def run(self, accreditation: str, faculty_ids: Sequence[str] | None = None) -> list[dict]:
+        """Cria os arquivos da acreditação pedida."""
         accreditation_key = accreditation.strip().upper()
-        if accreditation_key not in ACCREDITATION_RULES:
-            raise ValueError(f"Unsupported accreditation type: {accreditation}")
-
-        rules = ACCREDITATION_RULES[accreditation_key]
+        if not accreditation_key:
+            raise ValueError("Accreditation must not be empty")
         planned_ids = list(faculty_ids) if faculty_ids else self._fetch_all_ids()
         logger.info("Starting automation for %s with %d faculty", accreditation_key, len(planned_ids))
 
@@ -240,19 +215,13 @@ class CVAutomation:
                     logger.warning("Skipping faculty %s: no base record found", faculty_id)
                     continue
 
-                filtered_experience = self._filter_experience(profile.experiences, rules)
-                summarized_production = self._summarize_production(profile.productions, rules)
-                limited_profile = replace(
-                    profile,
-                    experiences=filtered_experience,
-                    productions=summarized_production,
-                )
+                limited_profile = profile
 
                 docx_path = accreditation_dir / f"{faculty_id}_{_slugify(profile.name)}.docx"
                 json_path = accreditation_dir / f"{faculty_id}_{_slugify(profile.name)}.json"
 
                 try:
-                    self._generate_document(limited_profile, accreditation_key, docx_path)
+                    self._generate_document(limited_profile, docx_path)
                     self._write_json(limited_profile, json_path)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Failed to render CV for faculty %s: %s", faculty_id, exc)
@@ -263,10 +232,8 @@ class CVAutomation:
                         "faculty_id": faculty_id,
                         "name": profile.name,
                         "accreditation": accreditation_key,
-                        "rule_version": rules["version"],
-                        "template_version": TEMPLATE_VERSION,
-                        "docx_path": str(docx_path.relative_to(self.output_root)),
-                        "json_path": str(json_path.relative_to(self.output_root)),
+                        "docx_path": docx_path.relative_to(self.output_root).as_posix(),
+                        "json_path": json_path.relative_to(self.output_root).as_posix(),
                         "generated_at": timestamp,
                     }
                 )
@@ -282,7 +249,7 @@ class CVAutomation:
         return metadata
 
     def fetch_profile(self, faculty_id: str) -> dict | None:
-        """Retorna o dicionário serializável de um docente específico."""
+        """Busca um docente pelo id e devolve os dados prontos para JSON."""
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             try:
@@ -301,7 +268,7 @@ class CVAutomation:
         return profile.to_serializable()
 
     def fetch_all_profiles(self) -> list[dict]:
-        """Retorna todos os docentes como uma lista de dicionários serializáveis."""
+        """Devolve todos os docentes com os dados já formatados."""
         faculty_ids = self._fetch_all_ids()
         if not faculty_ids:
             return []
@@ -310,6 +277,7 @@ class CVAutomation:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             for faculty_id in faculty_ids:
+                # Continua mesmo se um docente gerar erro.
                 try:
                     profile = self._build_profile(conn, faculty_id)
                 except Exception as exc:  # noqa: BLE001
@@ -326,6 +294,30 @@ class CVAutomation:
                 results.append(profile.to_serializable())
 
         return results
+
+    def export_doc(self, faculty_id: str) -> dict | None:
+        """Gera apenas o DOCX para um docente específico."""
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            profile = self._build_profile(conn, faculty_id)
+
+        if profile is None:
+            return None
+
+        limited_profile = profile
+
+        docx_path = self.output_root / f"{faculty_id}_{_slugify(profile.name)}.docx"
+        docx_path.parent.mkdir(parents=True, exist_ok=True)
+        self._generate_document(limited_profile, docx_path)
+
+        metadata = {
+            "faculty_id": faculty_id,
+            "name": profile.name,
+            "docx_path": docx_path.relative_to(self.output_root).as_posix(),
+        }
+
+        return metadata
 
     def _fetch_all_ids(self) -> list[str]:
         with sqlite3.connect(self.db_path) as conn:
@@ -474,20 +466,6 @@ class CVAutomation:
                 end=_parse_date(row["fim"]),
             )
 
-    def _filter_experience(self, experiences: Iterable[ExperienceEntry], rules: dict) -> list[ExperienceEntry]:
-        reference = datetime.utcnow()
-        filtered = [exp for exp in experiences if exp.is_within_window(rules["experience_years"], reference)]
-        return filtered[: rules["max_experience"]]
-
-    def _summarize_production(self, productions: Iterable[ProductionEntry], rules: dict) -> list[ProductionEntry]:
-        try:
-            requested_limit = int(rules.get("summary_limit", 5))
-        except (TypeError, ValueError):
-            requested_limit = 5
-        limit = max(requested_limit, 5)
-        filtered = [prod for prod in productions if prod.title]
-        return filtered[:limit]
-
     def _load_production(self, conn: sqlite3.Connection, faculty_name: str) -> Iterable[ProductionEntry]:
         cursor = conn.execute(
             """
@@ -523,17 +501,100 @@ class CVAutomation:
                 lattes_info=row["informa_o_cv_lattes"],
             )
 
-    def _generate_document(self, profile: FacultyProfile, accreditation: str, destination: Path) -> None:
+    # Formatação do documento .docx
+
+
+    def _format_header(self, document, profile: FacultyProfile):
+        name_para = document.add_paragraph(profile.name)
+        name_para.alignment = 1  
+        name_run = name_para.runs[0]
+        name_run.font.name = 'Times New Roman'
+        name_run.font.size = Pt(14)
+        name_run.font.bold = True
+        name_para.paragraph_format.space_after = Pt(3)
+        
+        # Institution
+        inst_para = document.add_paragraph("Insper Instituto de Ensino e Pesquisa")
+        inst_para.alignment = 1  
+        inst_para.runs[0].font.name = 'Times New Roman'
+        inst_para.runs[0].font.size = Pt(12)
+        inst_para.runs[0].font.bold = True
+        inst_para.paragraph_format.space_after = Pt(2)
+        
+        # Position
+        pos_para = document.add_paragraph(profile.career_en or profile.career)
+        pos_para.alignment = 1  
+        pos_para.runs[0].font.name = 'Times New Roman'
+        pos_para.runs[0].font.size = Pt(12)
+        pos_para.runs[0].font.bold = True
+        pos_para.paragraph_format.space_after = Pt(2)
+        
+        # Specialization/Area
+        if profile.specialization:
+            spec_para = document.add_paragraph(profile.area + " - " + profile.specialization)
+            spec_para.alignment = 1  
+            spec_para.runs[0].font.name = 'Times New Roman'
+            spec_para.runs[0].font.size = Pt(12)
+            spec_para.runs[0].font.bold = True
+            spec_para.paragraph_format.space_after = Pt(2)
+        
+        # Email
+        email_para = document.add_paragraph(profile.email)
+        email_para.alignment = 1  
+        email_para.runs[0].font.name = 'Times New Roman'
+        email_para.runs[0].font.size = Pt(12)
+        email_para.runs[0].font.bold = True
+        email_para.paragraph_format.space_after = Pt(2)
+        
+        # Admission date
+        if profile.admission_date:
+            formatted_date = _format_date(profile.admission_date)
+            adm_para = document.add_paragraph(f"Admission: {formatted_date}")
+            adm_para.alignment = 1  
+            adm_para.runs[0].font.name = 'Times New Roman'
+            adm_para.runs[0].font.size = Pt(12)
+            adm_para.runs[0].font.bold = True
+            adm_para.paragraph_format.space_after = Pt(2)
+        
+        # Lattes URL
+        if profile.lattes:
+            lattes_para = document.add_paragraph(profile.lattes)
+            lattes_para.alignment = 1  
+            lattes_para.runs[0].font.name = 'Times New Roman'
+            lattes_para.runs[0].font.size = Pt(12)
+            lattes_para.runs[0].font.bold = True
+            lattes_para.paragraph_format.space_after = Pt(2)
+        
+        # Academic Unit and Nationality
+        unit_text = f"Academic Unit: {profile.unit} Nationality: Brazil"
+        unit_para = document.add_paragraph(unit_text)
+        unit_para.runs[0].font.name = 'Times New Roman'
+        unit_para.runs[0].font.size = Pt(12)
+        unit_para.paragraph_format.space_after = Pt(12)
+
+
+    def _generate_document(
+        self,
+        profile: FacultyProfile,
+        destination: Path,
+    ) -> None:
+        
         document = Document()
-        document.add_heading(profile.name, level=0)
+        self._format_header(document, profile)
+
+        # Header com informações do docente
+        heading = document.add_heading(profile.name, level=0)
+        heading.runs[0].font.name = 'Times New Roman'
+        heading.runs[0].font.size = Pt(16)
+        heading.runs[0].font.bold = True
 
         document.add_heading("Faculty Overview", level=1)
+        
         overview_table = document.add_table(rows=1, cols=2)
         overview_table.style = "Light Grid Accent 1"
         _append_table_rows(
             overview_table,
             [
-                ("Accreditation", accreditation),
                 ("Career Track (EN)", profile.career_en),
                 ("Career Track", profile.career),
                 ("Specialization", profile.specialization),
@@ -563,14 +624,11 @@ class CVAutomation:
             ],
         )
 
-        document.add_heading("Accreditation Snapshot", level=1)
         accreditation_table = document.add_table(rows=1, cols=2)
         accreditation_table.style = "Light List Accent 2"
         _append_table_rows(
             accreditation_table,
             [
-                ("Rule Version", ACCREDITATION_RULES[accreditation]["version"]),
-                ("Template Version", TEMPLATE_VERSION),
                 ("Time Mission", profile.time_mission),
                 ("FTE", profile.fte),
                 ("Teaching Load (hrs)", profile.teaching_load),
@@ -602,19 +660,19 @@ class CVAutomation:
                 if record.year:
                     parts.append(str(record.year))
                 document.add_paragraph(" | ".join(parts), style="List Bullet")
-        else:
-            document.add_paragraph("No education records available.")
 
         document.add_heading("Academic Production", level=1)
         if profile.productions:
             for entry in profile.productions:
-                bullet = document.add_paragraph(style="List Bullet")
                 headline_parts = []
                 if entry.year:
                     headline_parts.append(str(entry.year))
                 if entry.title:
                     headline_parts.append(entry.title)
-                bullet.add_run(" – ".join(headline_parts) if headline_parts else "Production item")
+                if not headline_parts:
+                    continue
+                bullet = document.add_paragraph(style="List Bullet")
+                bullet.add_run(" – ".join(headline_parts))
 
                 detail_parts = []
                 if entry.production_type:
@@ -639,29 +697,28 @@ class CVAutomation:
                     evidence_parts.append(f"Lattes: {entry.lattes_info}")
                 if evidence_parts:
                     bullet.add_run(f" – {'; '.join(evidence_parts)}")
-        else:
-            document.add_paragraph("No academic production records available.")
 
         document.add_heading("Professional Experience", level=1)
         if profile.experiences:
             for entry in profile.experiences:
-                segment = [entry.role, entry.organization]
+                segment = [value for value in [entry.role, entry.organization] if value]
                 location = ", ".join(part for part in [entry.city, entry.country] if part)
                 if location:
                     segment.append(location)
-                timeline = f"{_format_date(entry.start) or 'N/A'} – {_format_date(entry.end) or 'Present'}"
-                segment.append(timeline)
+                start_text = _format_date(entry.start) or ""
+                end_text = _format_date(entry.end) or ""
+                timeline_parts = [part for part in [start_text, end_text] if part]
+                if timeline_parts:
+                    segment.append(" – ".join(timeline_parts))
                 if entry.category:
                     segment.append(entry.category)
-                document.add_paragraph(" | ".join(segment), style="List Bullet")
-        else:
-            document.add_paragraph("No recent experience records available.")
+                if segment:
+                    document.add_paragraph(" | ".join(segment), style="List Bullet")
 
         document.core_properties.author = "CV Automation"
-        document.core_properties.subject = f"{accreditation} summarized CV"
-        document.core_properties.keywords = [accreditation, TEMPLATE_VERSION]
+        document.core_properties.subject = f"{profile.name} CV"
+        document.core_properties.keywords = ""
 
-        destination.parent.mkdir(parents=True, exist_ok=True)
         document.save(destination)
 
     def _write_json(self, profile: FacultyProfile, destination: Path) -> None:
@@ -675,7 +732,7 @@ def _append_table_rows(table, rows: list[tuple[str, str | None]]) -> None:
         else:
             row = table.add_row()
         row.cells[0].text = label
-        row.cells[1].text = str(value).strip() if value and str(value).strip() else "Not provided"
+        row.cells[1].text = str(value).strip() if value and str(value).strip() else ""
 
 
 def _build_education_records(row: sqlite3.Row) -> list[EducationRecord]:
@@ -738,10 +795,24 @@ def _slugify(text: str) -> str:
         slug = slug.replace("--", "-")
     return slug or "faculty"
 
+def _format_area(text: str) -> str:
+    safe = [c.lower() if c.isalnum() else "-" for c in text]
+    dict_areas = {
+        "FIN": "Finance",
+        "MGT": "Management",
+        "QTM": "Quantitative Methods",
+        "NSA": "Not Specified Area",
+        "LEG": "Legal Studies",
+        "ECO": "Economics",
+        "MKT": "Marketing",
+        "ITO": "Information Technology",
+        
+    }
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate summarized accreditation CVs")
-    parser.add_argument("--accreditation", required=True, choices=sorted(ACCREDITATION_RULES.keys()))
+    parser.add_argument("--accreditation", required=True)
     parser.add_argument("--faculty", nargs="*", help="Optional list of faculty IDs to process")
     args = parser.parse_args()
 
