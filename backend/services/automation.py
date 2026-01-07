@@ -281,6 +281,52 @@ class CVAutomation:
 
         return metadata
 
+    def fetch_profile(self, faculty_id: str) -> dict | None:
+        """Retorna o dicionário serializável de um docente específico."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            try:
+                profile = self._build_profile(conn, faculty_id)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "Falha ao recuperar dados do docente %s: %s",
+                    faculty_id,
+                    exc,
+                )
+                return None
+
+        if profile is None:
+            return None
+
+        return profile.to_serializable()
+
+    def fetch_all_profiles(self) -> list[dict]:
+        """Retorna todos os docentes como uma lista de dicionários serializáveis."""
+        faculty_ids = self._fetch_all_ids()
+        if not faculty_ids:
+            return []
+
+        results: list[dict] = []
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            for faculty_id in faculty_ids:
+                try:
+                    profile = self._build_profile(conn, faculty_id)
+                except Exception as exc:  # noqa: BLE001
+                    logger.exception(
+                        "Falha ao recuperar dados do docente %s: %s",
+                        faculty_id,
+                        exc,
+                    )
+                    continue
+
+                if profile is None:
+                    continue
+
+                results.append(profile.to_serializable())
+
+        return results
+
     def _fetch_all_ids(self) -> list[str]:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT id FROM base_de_dados_docente")
