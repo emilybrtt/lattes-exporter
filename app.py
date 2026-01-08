@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, abort, jsonify, request, send_file, url_for
 from flask_cors import CORS
 
 from backend.services.automation import CVAutomation
@@ -49,7 +49,31 @@ def export_faculty():
     if metadata is None:
         return jsonify({"error": "Docente não encontrado"}), 404
 
+    docx_path = metadata.get("docx_path")
+    if docx_path:
+        metadata["docx_url"] = url_for(
+            "download_artifact",
+            resource=docx_path,
+            _external=True,
+        )
+
     return jsonify(metadata)
+
+
+@app.get("/artifacts/<path:resource>")
+def download_artifact(resource: str):
+    base_dir = automation_service.output_root.resolve()
+    target_path = (base_dir / resource).resolve()
+
+    try:
+        target_path.relative_to(base_dir)
+    except ValueError:
+        abort(404)
+
+    if not target_path.exists() or not target_path.is_file():
+        abort(404)
+
+    return send_file(target_path, as_attachment=True, download_name=target_path.name)
 
 
 @app.get("/automation/status")

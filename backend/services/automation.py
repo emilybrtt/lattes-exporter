@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 @dataclass
 class EducationRecord:
-    """Guarda um curso ou diploma do docente."""
+    """Guarda um curso ou diploma do docente """
     degree: str | None
     institution: str | None
     year: str | None
@@ -32,7 +32,7 @@ class EducationRecord:
 
 @dataclass
 class ExperienceEntry:
-    """Registra uma experiência profissional relevante."""
+    """Registra uma experiência profissional relevante """
     role: str | None
     organization: str | None
     city: str | None
@@ -51,7 +51,7 @@ class ExperienceEntry:
 
 @dataclass
 class ProductionEntry:
-    """Resume uma produção acadêmica que vai para o CV."""
+    """Resume uma produção acadêmica que vai para o CV """
     year: str | None
     title: str | None
     production_type: str | None
@@ -66,7 +66,7 @@ class ProductionEntry:
 
 @dataclass
 class FacultyProfile:
-    """Reúne todas as informações consolidadas de um docente."""
+    """Reúne todas as informações consolidadas de um docente """
     faculty_id: str
     name: str
     email: str | None
@@ -112,7 +112,7 @@ class FacultyProfile:
     masters_country: str | None
 
     def to_serializable(self) -> dict:
-        """Transforma o perfil em um dicionário pronto para JSON."""
+        """Transforma o perfil em um dicionário pronto para JSON """
         return {
             "faculty": {
                 "id": self.faculty_id,
@@ -192,13 +192,13 @@ class FacultyProfile:
 
 class CVAutomation:
     def __init__(self, output_root: Path = OUTPUT_DIR):
-        """Configura caminho do banco e da pasta de saída."""
+        """Configura caminho do banco e da pasta de saída """
         self.db_path = sqlite_path()
         self.output_root = output_root
         self.output_root.mkdir(parents=True, exist_ok=True)
 
     def run(self, accreditation: str, faculty_ids: Sequence[str] | None = None) -> list[dict]:
-        """Cria os arquivos da acreditação pedida."""
+        """Cria os arquivos da acreditação pedida """
         accreditation_key = accreditation.strip().upper()
         if not accreditation_key:
             raise ValueError("Accreditation must not be empty")
@@ -258,7 +258,7 @@ class CVAutomation:
         return metadata
 
     def fetch_profile(self, faculty_id: str) -> dict | None:
-        """Busca um docente pelo id e devolve os dados prontos para JSON."""
+        """Busca um docente pelo id e devolve os dados prontos para JSON """
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             try:
@@ -278,7 +278,7 @@ class CVAutomation:
         return profile.to_serializable()
 
     def fetch_all_profiles(self) -> list[dict]:
-        """Devolve todos os docentes com os dados já formatados."""
+        """Devolve todos os docentes com os dados já formatados """
         faculty_ids = self._fetch_all_ids()
         if not faculty_ids:
             return []
@@ -287,9 +287,9 @@ class CVAutomation:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             for faculty_id in faculty_ids:
-                # Continua mesmo se um docente gerar erro.
+                # Continua mesmo se um docente gerar erro
                 try:
-                    # Evita travar a exportação quando um registro falha.
+                    # Evita travar a exportação quando um registro falha
                     profile = self._build_profile(conn, faculty_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
@@ -307,7 +307,7 @@ class CVAutomation:
         return results
 
     def export_doc(self, faculty_id: str) -> dict | None:
-        """Gera apenas o DOCX para um docente específico."""
+        """Gera apenas o DOCX para um docente específico """
 
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
@@ -336,7 +336,7 @@ class CVAutomation:
             return [str(row[0]) for row in cursor.fetchall()]
 
     def _build_profile(self, conn: sqlite3.Connection, faculty_id: str) -> FacultyProfile | None:
-        """Lê todas as colunas necessárias para gerar um perfil completo."""
+        """Lê todas as colunas necessárias para gerar um perfil completo """
         faculty_row = conn.execute(
             """
             SELECT
@@ -449,7 +449,7 @@ class CVAutomation:
         )
 
     def _load_experience(self, conn: sqlite3.Connection, faculty_id: str) -> Iterable[ExperienceEntry]:
-        """Filtra experiências do docente que estejam em inglês."""
+        """Filtra experiências do docente que estejam em inglês """
         cursor = conn.execute(
             """
             SELECT
@@ -483,7 +483,7 @@ class CVAutomation:
             )
 
     def _load_production(self, conn: sqlite3.Connection, faculty_name: str) -> Iterable[ProductionEntry]:
-        """Busca produções acadêmicas ordenadas por ano."""
+        """Busca produções acadêmicas ordenadas por ano """
         cursor = conn.execute(
             """
             SELECT
@@ -520,7 +520,7 @@ class CVAutomation:
 
     # ========== Formatação do documento .docx ===========
     def _format_header(self, document, profile: FacultyProfile):
-        """Monta cabeçalho com informações básicas do docente."""
+        """Monta cabeçalho com informações básicas do docente """
         name_para = document.add_paragraph(profile.name)
         name_para.alignment = 1  
         name_run = name_para.runs[0]
@@ -627,7 +627,7 @@ class CVAutomation:
     # =========================================================================
 
     def _add_section_header(self, document, text: str):
-        """Adiciona um cabeçalho H1 com a formatação específica (Borda inferior)."""
+        """Adiciona um cabeçalho H1 com a formatação específica (Borda inferior) """
         heading = document.add_heading(text, level=1)
         
         # Formatação do Texto
@@ -657,7 +657,7 @@ class CVAutomation:
         return heading
 
     def _add_subheader(self, document, text: str):
-        """Adiciona subtítulo simples (apenas negrito, sem borda)."""
+        """Adiciona subtítulo simples (apenas negrito, sem borda) """
         p = document.add_paragraph()
         run = p.add_run(text)
         run.font.name = 'Times New Roman'
@@ -667,7 +667,7 @@ class CVAutomation:
         p.paragraph_format.space_before = Pt(6)
 
     def _create_layout_table(self, document):
-        """Cria a tabela base de 2 colunas para layout de data/conteúdo."""
+        """Cria a tabela base de 2 colunas para layout de data/conteúdo """
         table = document.add_table(rows=0, cols=2)
         table.autofit = False
         table.columns[0].width = Inches(0.85)
@@ -675,7 +675,7 @@ class CVAutomation:
         return table
 
     def _add_layout_row(self, table, left_text: str, right_text: str):
-        """Adiciona uma linha formatada à tabela e remove as bordas."""
+        """Adiciona uma linha formatada à tabela e remove as bordas """
         row = table.add_row()
         
         # Coluna 1: Data/Ano
@@ -873,7 +873,7 @@ class CVAutomation:
                     
                     # Natureza / Journal
                     if item.nature:
-                        run_nature = p.add_run(f"{item.nature}.")
+                        run_nature = p.add_run(f"{item.nature} ")
                         run_nature.font.name = 'Times New Roman'
                         run_nature.font.size = Pt(11)
                         run_nature.font.italic = True
@@ -889,7 +889,7 @@ class CVAutomation:
 
 
 def _append_table_rows(table, rows: list[tuple[str, str | None]]) -> None:
-    """Ajuda a preencher tabelas simples sem repetir código."""
+    """Ajuda a preencher tabelas simples sem repetir código """
     for index, (label, value) in enumerate(rows):
         if index == 0 and len(table.rows) == 1 and not table.rows[0].cells[0].text:
             row = table.rows[0]
@@ -900,7 +900,7 @@ def _append_table_rows(table, rows: list[tuple[str, str | None]]) -> None:
 
 
 def _build_education_records(row: sqlite3.Row) -> list[EducationRecord]:
-    """Monta lista com as titulações mais relevantes do docente."""
+    """Monta lista com as titulações mais relevantes do docente """
     education: list[EducationRecord] = []
     if row["t_dout_en"]:
         education.append(
@@ -933,7 +933,7 @@ def _build_education_records(row: sqlite3.Row) -> list[EducationRecord]:
 
 
 def _parse_date(raw: str | None) -> datetime | None:
-    """Converte textos de data em objetos datetime tratados."""
+    """Converte textos de data em objetos datetime tratados """
     if not raw:
         return None
     text = raw.strip()
@@ -949,14 +949,14 @@ def _parse_date(raw: str | None) -> datetime | None:
 
 
 def _format_date(value: datetime | None) -> str | None:
-    """Formata datas no padrão "Mes Ano" esperado pelo relatório."""
+    """Formata datas no padrão "Mes Ano" esperado pelo relatório """
     if value is None:
         return None
     return value.strftime("%b %Y")
 
 
 def _slugify(text: str) -> str:
-    """Gera um identificador seguro para nomes de arquivo."""
+    """Gera um identificador seguro para nomes de arquivo """
     safe = [c.lower() if c.isalnum() else "-" for c in text]
     slug = "".join(safe).strip("-")
     while "--" in slug:
@@ -976,7 +976,7 @@ dict_areas={
 }
 
 def _format_area(text: str) -> str:
-    """Traduz códigos de área para descrições amigáveis."""
+    """Traduz códigos de área para descrições amigáveis """
     safe = ""
     for c in text.strip():
         c.upper()
