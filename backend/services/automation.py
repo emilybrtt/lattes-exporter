@@ -11,6 +11,7 @@ from typing import Iterable, Sequence
 
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
+import docx.oxml      
 
 from backend.core.config import OUTPUT_DIR, sqlite_path
 
@@ -67,6 +68,7 @@ class FacultyProfile:
     faculty_id: str
     name: str
     email: str | None
+    nationality: str | None
     area: str | None
     specialization: str | None
     unit: str | None
@@ -113,6 +115,7 @@ class FacultyProfile:
                 "id": self.faculty_id,
                 "name": self.name,
                 "email": self.email,
+                "nationality": self.nationality,
                 "area": self.area,
                 "specialization": self.specialization,
                 "unit": self.unit,
@@ -183,6 +186,7 @@ class FacultyProfile:
                 for entry in self.productions
             ],
         }
+
 class CVAutomation:
     def __init__(self, output_root: Path = OUTPUT_DIR):
         self.db_path = sqlite_path()
@@ -331,6 +335,7 @@ class CVAutomation:
                 id,
                 nome_padrao,
                 email,
+                nacionalidade,
                 area,
                 nova_area,
                 unid_acad,
@@ -392,6 +397,7 @@ class CVAutomation:
             faculty_id=str(faculty_row["id"]),
             name=faculty_row["nome_padrao"],
             email=faculty_row["email"],
+            nationality=faculty_row["nacionalidade"],
             area=faculty_row["area"],
             specialization=faculty_row["nova_area"],
             unit=faculty_row["unid_acad"],
@@ -501,9 +507,7 @@ class CVAutomation:
                 lattes_info=row["informa_o_cv_lattes"],
             )
 
-    # Formatação do documento .docx
-
-
+    # ========== Formatação do documento .docx ===========
     def _format_header(self, document, profile: FacultyProfile):
         name_para = document.add_paragraph(profile.name)
         name_para.alignment = 1  
@@ -529,14 +533,13 @@ class CVAutomation:
         pos_para.runs[0].font.bold = True
         pos_para.paragraph_format.space_after = Pt(2)
         
-        # Specialization/Area
-        if profile.specialization:
-            spec_para = document.add_paragraph(profile.area + " - " + profile.specialization)
-            spec_para.alignment = 1  
-            spec_para.runs[0].font.name = 'Times New Roman'
-            spec_para.runs[0].font.size = Pt(12)
-            spec_para.runs[0].font.bold = True
-            spec_para.paragraph_format.space_after = Pt(2)
+        # Area
+        area_para = document.add_paragraph(_format_area(profile.area or ""))
+        area_para.alignment = 1  
+        area_para.runs[0].font.name = 'Times New Roman'
+        area_para.runs[0].font.size = Pt(12)
+        area_para.runs[0].font.bold = True
+        area_para.paragraph_format.space_after = Pt(2)
         
         # Email
         email_para = document.add_paragraph(profile.email)
@@ -562,16 +565,133 @@ class CVAutomation:
             lattes_para.alignment = 1  
             lattes_para.runs[0].font.name = 'Times New Roman'
             lattes_para.runs[0].font.size = Pt(12)
-            lattes_para.runs[0].font.bold = True
-            lattes_para.paragraph_format.space_after = Pt(2)
+            lattes_para.runs[0].font.bold = False
+            lattes_para.paragraph_format.space_after = Pt(12)
         
         # Academic Unit and Nationality
-        unit_text = f"Academic Unit: {profile.unit} Nationality: Brazil"
-        unit_para = document.add_paragraph(unit_text)
-        unit_para.runs[0].font.name = 'Times New Roman'
-        unit_para.runs[0].font.size = Pt(12)
-        unit_para.paragraph_format.space_after = Pt(12)
+        dict_units={
+            'M&E': "Management and Economics",
+            'LAW': "Law",
+            'ENG&CC': "Engineering and Computer Science",
+        }
+        unit_text = f"Academic Unit: {dict_units.get(profile.unit, profile.unit)}"
+        nationality_text = f"Nationality: {profile.nationality}"
 
+        # Specialization/Area e Nationality na mesma linha
+        if profile.unit or profile.nationality:
+            # Criar tabela com 1 linha e 2 colunas
+            table = document.add_table(rows=1, cols=2)
+            table.alignment = 0  # Alinhamento à esquerda
+            
+            # Remover bordas da tabela
+            for row in table.rows:
+                for cell in row.cells:
+                    cell._element.get_or_add_tcPr().append(
+                        docx.oxml.parse_xml(r'<w:tcBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:top w:val="none"/><w:left w:val="none"/><w:bottom w:val="none"/><w:right w:val="none"/></w:tcBorders>')
+                    )
+            
+            # Célula esquerda - Especialização
+            left_cell = table.rows[0].cells[0]
+            if profile.specialization:
+                left_para = left_cell.paragraphs[0]
+                run_left = left_para.add_run(unit_text)
+                run_left.font.name = 'Times New Roman'
+                run_left.font.size = Pt(12)
+            
+            # Célula direita - Nacionalidade
+            right_cell = table.rows[0].cells[1]
+            if profile.nationality:
+                right_para = right_cell.paragraphs[0]
+                right_para.alignment = 2
+                run_right = right_para.add_run(nationality_text)
+                run_right.font.name = 'Times New Roman'
+                run_right.font.size = Pt(12)
+            
+            # Espaçamento após a tabela
+            table.rows[0].height = Pt(14)
+
+    # =========================================================================
+    # MÉTODOS AUXILIARES DE FORMATAÇÃO E LAYOUT
+    # =========================================================================
+
+    def _add_section_header(self, document, text: str):
+        """Adiciona um cabeçalho H1 com a formatação específica (Borda inferior)."""
+        heading = document.add_heading(text, level=1)
+        
+        # Formatação do Texto
+        if heading.runs:
+            run = heading.runs[0]
+        else:
+            run = heading.add_run()
+            
+        run.font.name = 'Times New Roman'
+        run.font.size = Pt(12)
+        run.font.bold = True
+        run.font.color.rgb = RGBColor(0, 0, 0)
+        run._element.rPr.rFonts.set(docx.oxml.ns.qn('w:eastAsia'), 'Times New Roman')
+        
+        # Espaçamento
+        heading.paragraph_format.space_after = Pt(6)
+        heading.paragraph_format.space_before = Pt(12)
+        
+        # Borda Inferior (XML Injection)
+        p_pr = heading._element.get_or_add_pPr()
+        p_borders = docx.oxml.parse_xml(
+            r'<w:pBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+            r'<w:bottom w:val="single" w:sz="4" w:space="1" w:color="000000"/>'
+            r'</w:pBorders>'
+        )
+        p_pr.append(p_borders)
+        return heading
+
+    def _add_subheader(self, document, text: str):
+        """Adiciona subtítulo simples (apenas negrito, sem borda)."""
+        p = document.add_paragraph()
+        run = p.add_run(text)
+        run.font.name = 'Times New Roman'
+        run.font.size = Pt(12)
+        run.font.bold = True
+        p.paragraph_format.space_after = Pt(2)
+        p.paragraph_format.space_before = Pt(6)
+
+    def _create_layout_table(self, document):
+        """Cria a tabela base de 2 colunas para layout de data/conteúdo."""
+        table = document.add_table(rows=0, cols=2)
+        table.autofit = False
+        table.columns[0].width = Inches(0.85)
+        table.columns[1].width = Inches(5.65)
+        return table
+
+    def _add_layout_row(self, table, left_text: str, right_text: str):
+        """Adiciona uma linha formatada à tabela e remove as bordas."""
+        row = table.add_row()
+        
+        # Coluna 1: Data/Ano
+        row.cells[0].text = left_text
+        if row.cells[0].paragraphs[0].runs:
+            run = row.cells[0].paragraphs[0].runs[0]
+            run.font.name = 'Times New Roman'
+            run.font.size = Pt(11)
+
+        # Coluna 2: Conteúdo
+        row.cells[1].text = right_text
+        if row.cells[1].paragraphs[0].runs:
+            run = row.cells[1].paragraphs[0].runs[0]
+            run.font.name = 'Times New Roman'
+            run.font.size = Pt(11)
+
+        # Remove bordas da célula (XML Injection)
+        for cell in row.cells:
+            tc_pr = cell._element.get_or_add_tcPr()
+            tc_borders = docx.oxml.parse_xml(
+                r'<w:tcBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                r'<w:top w:val="none"/>'
+                r'<w:left w:val="none"/>'
+                r'<w:bottom w:val="none"/>'
+                r'<w:right w:val="none"/>'
+                r'</w:tcBorders>'
+            )
+            tc_pr.append(tc_borders)
 
     def _generate_document(
         self,
@@ -580,145 +700,176 @@ class CVAutomation:
     ) -> None:
         
         document = Document()
+        
+        # Ajuste global de margens se necessário
+        # section = document.sections[0]
+        # section.left_margin = Inches(1.0)
+        # section.right_margin = Inches(1.0)
+
         self._format_header(document, profile)
 
-        # Header com informações do docente
-        heading = document.add_heading(profile.name, level=0)
-        heading.runs[0].font.name = 'Times New Roman'
-        heading.runs[0].font.size = Pt(16)
-        heading.runs[0].font.bold = True
-
-        document.add_heading("Faculty Overview", level=1)
+        # ========== EDUCATION ==========
         
-        overview_table = document.add_table(rows=1, cols=2)
-        overview_table.style = "Light Grid Accent 1"
-        _append_table_rows(
-            overview_table,
-            [
-                ("Career Track (EN)", profile.career_en),
-                ("Career Track", profile.career),
-                ("Specialization", profile.specialization),
-                ("Unit", profile.unit),
-                ("Core/Non-core", profile.core_status),
-                ("Vertente", profile.vertente),
-                ("Regime", profile.regime),
-                ("Vínculo", profile.vinculo),
-                ("Admission Date", _format_date(profile.admission_date)),
-                ("Highest Degree", profile.highest_degree),
-            ],
-        )
-
-        document.add_heading("Contact & Profiles", level=1)
-        contacts_table = document.add_table(rows=1, cols=2)
-        contacts_table.style = "Light Grid"
-        _append_table_rows(
-            contacts_table,
-            [
-                ("Email", profile.email),
-                ("ORCID", profile.orcid),
-                ("Scholar", profile.scholar_profile),
-                ("Scopus", profile.scopus_profile),
-                ("Lattes", profile.lattes),
-                ("LinkedIn", profile.linkedin),
-                ("Website", profile.personal_site),
-            ],
-        )
-
-        accreditation_table = document.add_table(rows=1, cols=2)
-        accreditation_table.style = "Light List Accent 2"
-        _append_table_rows(
-            accreditation_table,
-            [
-                ("Time Mission", profile.time_mission),
-                ("FTE", profile.fte),
-                ("Teaching Load (hrs)", profile.teaching_load),
-                ("Exec Ed Load (hrs)", profile.executive_education_load),
-                ("Professional Experience Summary", profile.experience_summary),
-                ("International Experience", profile.international_experience),
-                ("Title Valid Brazil", profile.title_valid_brazil),
-                ("Accreditation Flag", profile.accreditation_flag),
-                ("Allocation", profile.allocation_tag),
-            ],
-        )
-
-        if profile.qualification_summary:
-            document.add_heading("Qualification Summary", level=1)
-            document.add_paragraph(profile.qualification_summary)
-
-        if profile.engagement_description:
-            document.add_heading("Engagement", level=1)
-            document.add_paragraph(profile.engagement_description)
-
-        document.add_heading("Education", level=1)
         if profile.education:
+            self._add_section_header(document, "EDUCATION")
+            
+            table = self._create_layout_table(document)
+            table.columns[0].width = Inches(0.7)  # Mantendo a largura específica usada anteriormente
+
             for record in profile.education:
-                parts = [record.degree]
-                if record.institution:
-                    parts.append(record.institution)
-                if record.country:
-                    parts.append(record.country)
-                if record.year:
-                    parts.append(str(record.year))
-                document.add_paragraph(" | ".join(parts), style="List Bullet")
+                year_text = str(record.year).strip() if record.year else ""
+                
+                parts = []
+                if record.degree: parts.append(record.degree)
+                if record.institution: parts.append(record.institution)
+                if record.country: parts.append(record.country)
+                full_text = ", ".join(parts)
+                
+                self._add_layout_row(table, year_text, full_text)
 
-        document.add_heading("Academic Production", level=1)
+            document.add_paragraph().paragraph_format.space_after = Pt(6)
+            
+            
+        # ========== PROFESSIONAL EXPERIENCE ==========
+        
+        prof_exps = [e for e in profile.experiences if e.category == 'Professional']
+        
+        if prof_exps:
+            self._add_section_header(document, "PROFESSIONAL EXPERIENCE")
+            self._add_subheader(document, "Professional experience")
+            
+            table = self._create_layout_table(document)
+            
+            for exp in prof_exps:
+                date_str = ""
+                if exp.start:
+                    year_start = exp.start.year
+                    if not exp.end:
+                        date_str = f"Since {year_start}"
+                    else:
+                        year_end = exp.end.year
+                        date_str = f"{year_start}-{year_end}"
+                
+                parts = [p for p in [exp.role, exp.organization] if p]
+                desc_str = " - ".join(parts)
+                if exp.country:
+                    desc_str += f", {exp.country}"
+                
+                self._add_layout_row(table, date_str, desc_str)
+            
+            document.add_paragraph().paragraph_format.space_after = Pt(6)
+
+
+        # ========== RESEARCH ACTIVITIES ==========
+        
+        res_exps = [e for e in profile.experiences if e.category == 'Research']
+        
+        if res_exps:
+            self._add_section_header(document, "RESEARCH ACTIVITIES")
+            self._add_subheader(document, "Research Activities & Institutional Contribution")
+            
+            table = self._create_layout_table(document)
+            
+            for exp in res_exps:
+                date_str = ""
+                if exp.start:
+                    if not exp.end:
+                        date_str = f"Since {exp.start.year}"
+                    else:
+                        date_str = f"{exp.start.year}-{exp.end.year}"
+                
+                desc_str = f"{exp.role} - {exp.organization}"
+                self._add_layout_row(table, date_str, desc_str)
+
+            document.add_paragraph().paragraph_format.space_after = Pt(6)
+
+
+        # ========== TEACHING EXPERIENCE ==========
+        acad_exps = [e for e in profile.experiences if e.category == 'Academic']
+        
+        if acad_exps:
+            self._add_section_header(document, "TEACHING EXPERIENCE")
+            self._add_subheader(document, "Teaching Experience")
+            
+            table = self._create_layout_table(document)
+            
+            for exp in acad_exps:
+                date_str = ""
+                if exp.start:
+                    if not exp.end:
+                        date_str = f"Since {exp.start.year}"
+                    else:
+                        date_str = f"{exp.start.year}-{exp.end.year}"
+                
+                parts = [p for p in [exp.role, exp.organization] if p]
+                desc_str = ", ".join(parts)
+                if exp.country:
+                    desc_str += f", {exp.country}"
+                    
+                self._add_layout_row(table, date_str, desc_str)
+            
+            document.add_paragraph().paragraph_format.space_after = Pt(6)
+
+
+        # ========== INTELLECTUAL CONTRIBUTIONS ==========
+
         if profile.productions:
-            for entry in profile.productions:
-                headline_parts = []
-                if entry.year:
-                    headline_parts.append(str(entry.year))
-                if entry.title:
-                    headline_parts.append(entry.title)
-                if not headline_parts:
-                    continue
-                bullet = document.add_paragraph(style="List Bullet")
-                bullet.add_run(" – ".join(headline_parts))
+            self._add_section_header(document, "INTELLECTUAL CONTRIBUTIONS")
+            
+            grouped_prod = {}
+            for prod in profile.productions:
+                p_type = prod.production_type or "Other Productions"
+                # Ajuste de categorias baseado em palavras-chave comuns
+                if "Artigos" in p_type or "journal" in (prod.nature or "").lower():
+                    p_type = "Peer-reviewed Articles"
+                elif "Capítulo" in p_type or "Chapter" in p_type:
+                    p_type = "Book Chapters"
+                
+                if p_type not in grouped_prod:
+                    grouped_prod[p_type] = []
+                grouped_prod[p_type].append(prod)
 
-                detail_parts = []
-                if entry.production_type:
-                    detail_parts.append(entry.production_type)
-                if entry.nature:
-                    detail_parts.append(entry.nature)
-                if entry.classification:
-                    detail_parts.append(f"Classification: {entry.classification}")
-                if entry.peer_review:
-                    detail_parts.append(f"Peer review: {entry.peer_review}")
-                if detail_parts:
-                    bullet.add_run(f" ({'; '.join(detail_parts)})")
+            priority_order = ["Peer-reviewed Articles", "Book Chapters", "Books", "Other Productions"]
+            sorted_keys = sorted(grouped_prod.keys(), key=lambda k: priority_order.index(k) if k in priority_order else 99)
 
-                evidence_parts = []
-                if entry.status_savi:
-                    evidence_parts.append(f"SAVI: {entry.status_savi}")
-                if entry.status_biblioteca:
-                    evidence_parts.append(f"Library: {entry.status_biblioteca}")
-                if entry.evidence_source:
-                    evidence_parts.append(f"Evidence: {entry.evidence_source}")
-                if entry.lattes_info:
-                    evidence_parts.append(f"Lattes: {entry.lattes_info}")
-                if evidence_parts:
-                    bullet.add_run(f" – {'; '.join(evidence_parts)}")
+            for p_type in sorted_keys:
+                self._add_subheader(document, p_type)
+                
+                items = grouped_prod[p_type]
+                # Ordenar por ano decrescente
+                items.sort(key=lambda x: x.year or "0", reverse=True)
+                
+                for idx, item in enumerate(items, 1):
+                    p = document.add_paragraph()
+                    p.paragraph_format.space_after = Pt(4)
+                    
+                    # 1. Número
+                    run_num = p.add_run(f"{idx}. ")
+                    run_num.font.name = 'Times New Roman'
+                    run_num.font.size = Pt(11)
+                    
+                    # Título
+                    run_title = p.add_run(f"{item.title or ''} ")
+                    run_title.font.name = 'Times New Roman'
+                    run_title.font.size = Pt(11)
+                    
+                    # (Ano)
+                    if item.year:
+                        run_year = p.add_run(f"({item.year}). ")
+                        run_year.font.name = 'Times New Roman'
+                        run_year.font.size = Pt(11)
+                    
+                    # Natureza / Journal
+                    if item.nature:
+                        run_nature = p.add_run(f"{item.nature}.")
+                        run_nature.font.name = 'Times New Roman'
+                        run_nature.font.size = Pt(11)
+                        run_nature.font.italic = True
 
-        document.add_heading("Professional Experience", level=1)
-        if profile.experiences:
-            for entry in profile.experiences:
-                segment = [value for value in [entry.role, entry.organization] if value]
-                location = ", ".join(part for part in [entry.city, entry.country] if part)
-                if location:
-                    segment.append(location)
-                start_text = _format_date(entry.start) or ""
-                end_text = _format_date(entry.end) or ""
-                timeline_parts = [part for part in [start_text, end_text] if part]
-                if timeline_parts:
-                    segment.append(" – ".join(timeline_parts))
-                if entry.category:
-                    segment.append(entry.category)
-                if segment:
-                    document.add_paragraph(" | ".join(segment), style="List Bullet")
-
+        # Metadados do documento
         document.core_properties.author = "CV Automation"
         document.core_properties.subject = f"{profile.name} CV"
-        document.core_properties.keywords = ""
-
+        
         document.save(destination)
 
     def _write_json(self, profile: FacultyProfile, destination: Path) -> None:
@@ -795,19 +946,24 @@ def _slugify(text: str) -> str:
         slug = slug.replace("--", "-")
     return slug or "faculty"
 
+dict_areas={
+'FIN': "Finance",
+'MGT': "Management",
+'QTM': "Quantitative Methods",
+'NSA': "No Specific Area",
+'LEG': "Legal Studies",
+'ECO': "Economics",
+'MKT': "Marketing",
+'ACC': "Accounting",
+'ITO': "IT and Operations",
+}
+
 def _format_area(text: str) -> str:
-    safe = [c.lower() if c.isalnum() else "-" for c in text]
-    dict_areas = {
-        "FIN": "Finance",
-        "MGT": "Management",
-        "QTM": "Quantitative Methods",
-        "NSA": "Not Specified Area",
-        "LEG": "Legal Studies",
-        "ECO": "Economics",
-        "MKT": "Marketing",
-        "ITO": "Information Technology",
-        
-    }
+    safe = ""
+    for c in text.strip():
+        c.upper()
+        safe+=c
+    return dict_areas.get(safe, text)
 
 
 def main() -> None:
