@@ -18,6 +18,8 @@ from backend.core.config import OUTPUT_DIR, sqlite_path
 logger = logging.getLogger("cv_automation")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+# Estruturas de dados -------------------------------------------------------
+
 
 @dataclass
 class EducationRecord:
@@ -110,6 +112,7 @@ class FacultyProfile:
     masters_country: str | None
 
     def to_serializable(self) -> dict:
+        """Transforma o perfil em um dicionário pronto para JSON."""
         return {
             "faculty": {
                 "id": self.faculty_id,
@@ -189,6 +192,7 @@ class FacultyProfile:
 
 class CVAutomation:
     def __init__(self, output_root: Path = OUTPUT_DIR):
+        """Configura caminho do banco e da pasta de saída."""
         self.db_path = sqlite_path()
         self.output_root = output_root
         self.output_root.mkdir(parents=True, exist_ok=True)
@@ -209,6 +213,7 @@ class CVAutomation:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             for faculty_id in planned_ids:
+                # Monta os dados completos do docente direto do banco.
                 try:
                     profile = self._build_profile(conn, faculty_id)
                 except Exception as exc:  # noqa: BLE001
@@ -257,6 +262,7 @@ class CVAutomation:
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             try:
+                # Reaproveita a lógica interna para compor o perfil.
                 profile = self._build_profile(conn, faculty_id)
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
@@ -283,6 +289,7 @@ class CVAutomation:
             for faculty_id in faculty_ids:
                 # Continua mesmo se um docente gerar erro.
                 try:
+                    # Evita travar a exportação quando um registro falha.
                     profile = self._build_profile(conn, faculty_id)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception(
@@ -329,6 +336,7 @@ class CVAutomation:
             return [str(row[0]) for row in cursor.fetchall()]
 
     def _build_profile(self, conn: sqlite3.Connection, faculty_id: str) -> FacultyProfile | None:
+        """Lê todas as colunas necessárias para gerar um perfil completo."""
         faculty_row = conn.execute(
             """
             SELECT
@@ -381,6 +389,7 @@ class CVAutomation:
         if faculty_row is None:
             return None
 
+        # Carrega listas auxiliares (experiência, educação, produção).
         experiences = list(self._load_experience(conn, faculty_row["id"]))
         education = _build_education_records(faculty_row)
         try:
@@ -440,6 +449,7 @@ class CVAutomation:
         )
 
     def _load_experience(self, conn: sqlite3.Connection, faculty_id: str) -> Iterable[ExperienceEntry]:
+        """Filtra experiências do docente que estejam em inglês."""
         cursor = conn.execute(
             """
             SELECT
@@ -473,6 +483,7 @@ class CVAutomation:
             )
 
     def _load_production(self, conn: sqlite3.Connection, faculty_name: str) -> Iterable[ProductionEntry]:
+        """Busca produções acadêmicas ordenadas por ano."""
         cursor = conn.execute(
             """
             SELECT
@@ -509,6 +520,7 @@ class CVAutomation:
 
     # ========== Formatação do documento .docx ===========
     def _format_header(self, document, profile: FacultyProfile):
+        """Monta cabeçalho com informações básicas do docente."""
         name_para = document.add_paragraph(profile.name)
         name_para.alignment = 1  
         name_run = name_para.runs[0]
@@ -699,7 +711,7 @@ class CVAutomation:
         destination: Path,
     ) -> None:
         
-        document = Document()
+        document = Document()  # Cria documento vazio para montar o CV.
         
         # Ajuste global de margens se necessário
         # section = document.sections[0]
@@ -877,6 +889,7 @@ class CVAutomation:
 
 
 def _append_table_rows(table, rows: list[tuple[str, str | None]]) -> None:
+    """Ajuda a preencher tabelas simples sem repetir código."""
     for index, (label, value) in enumerate(rows):
         if index == 0 and len(table.rows) == 1 and not table.rows[0].cells[0].text:
             row = table.rows[0]
@@ -887,6 +900,7 @@ def _append_table_rows(table, rows: list[tuple[str, str | None]]) -> None:
 
 
 def _build_education_records(row: sqlite3.Row) -> list[EducationRecord]:
+    """Monta lista com as titulações mais relevantes do docente."""
     education: list[EducationRecord] = []
     if row["t_dout_en"]:
         education.append(
@@ -919,6 +933,7 @@ def _build_education_records(row: sqlite3.Row) -> list[EducationRecord]:
 
 
 def _parse_date(raw: str | None) -> datetime | None:
+    """Converte textos de data em objetos datetime tratados."""
     if not raw:
         return None
     text = raw.strip()
@@ -934,12 +949,14 @@ def _parse_date(raw: str | None) -> datetime | None:
 
 
 def _format_date(value: datetime | None) -> str | None:
+    """Formata datas no padrão "Mes Ano" esperado pelo relatório."""
     if value is None:
         return None
     return value.strftime("%b %Y")
 
 
 def _slugify(text: str) -> str:
+    """Gera um identificador seguro para nomes de arquivo."""
     safe = [c.lower() if c.isalnum() else "-" for c in text]
     slug = "".join(safe).strip("-")
     while "--" in slug:
@@ -959,6 +976,7 @@ dict_areas={
 }
 
 def _format_area(text: str) -> str:
+    """Traduz códigos de área para descrições amigáveis."""
     safe = ""
     for c in text.strip():
         c.upper()
