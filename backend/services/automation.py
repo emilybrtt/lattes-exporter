@@ -307,6 +307,56 @@ class CVAutomation:
 
         return results
 
+    def fetch_profiles_summary(self, *, offset: int = 0, limit: int = 50) -> tuple[list[dict], int]:
+        """Lê apenas os campos essenciais para montar os cards rapidamente."""
+        if limit <= 0:
+            raise ValueError("O parâmetro 'limit' deve ser positivo")
+        capped_limit = min(limit, 50)
+        safe_offset = max(offset, 0)
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            total_row = conn.execute(
+                "SELECT COUNT(1) AS total FROM base_de_dados_docente"
+            ).fetchone()
+            total = int(total_row["total"] if total_row is not None else 0)
+
+            rows = conn.execute(
+                """
+                SELECT id, nome_padrao, area, nova_area, unid_acad
+                FROM base_de_dados_docente
+                ORDER BY nome_padrao
+                LIMIT ? OFFSET ?
+                """,
+                (capped_limit, safe_offset),
+            ).fetchall()
+
+        summaries: list[dict] = []
+        for row in rows:
+            faculty_id = row["id"]
+            name = (row["nome_padrao"] or "").strip()
+            if not faculty_id or not name:
+                continue
+
+            area_code = (row["area"] or "").strip()
+            area_label = _format_area(area_code) if area_code else None
+            area_value_raw = row["nova_area"] or area_label
+            if isinstance(area_value_raw, str):
+                area_value_raw = area_value_raw.strip()
+            area_value = area_value_raw or None
+            unit_value = (row["unid_acad"] or "").strip() or None
+
+            summaries.append(
+                {
+                    "id": str(faculty_id),
+                    "name": name,
+                    "area": area_value,
+                    "unit": unit_value,
+                }
+            )
+
+        return summaries, total
+
     def export_artifact(self, faculty_id: str, export_format: str) -> dict | None:
         """Gera um artefato único no formato solicitado."""
 

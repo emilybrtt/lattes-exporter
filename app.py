@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from math import ceil
+
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, request, send_file, url_for
 from flask_cors import CORS
@@ -21,6 +23,48 @@ def list_faculty():
     """Lista todos os docentes com os dados consolidados em JSON """
     profiles = automation_service.fetch_all_profiles()
     return jsonify({"total": len(profiles), "result": profiles})
+
+
+@app.get("/summary")
+def list_faculty_summary():
+    """Lista dados essenciais (id, nome, área e unidade) com suporte a paginação."""
+
+    raw_page = request.args.get("page", default=1, type=int) or 1
+    raw_per_page = request.args.get("per_page", default=50, type=int) or 50
+
+    page = max(raw_page, 1)
+    per_page = min(max(raw_per_page, 1), 50)
+    offset = (page - 1) * per_page
+
+    try:
+        summaries, total = automation_service.fetch_profiles_summary(
+            offset=offset,
+            limit=per_page,
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    page_count = ceil(total / per_page) if total and per_page else 0
+
+    if total and page > page_count:
+        page = page_count
+        offset = (page - 1) * per_page
+        summaries, total = automation_service.fetch_profiles_summary(
+            offset=offset,
+            limit=per_page,
+        )
+    elif total == 0:
+        page = 1
+
+    return jsonify(
+        {
+            "page": page,
+            "per_page": per_page,
+            "total": total,
+            "pages": page_count,
+            "result": summaries,
+        }
+    )
 
 
 @app.get("/<int:faculty_id>")
