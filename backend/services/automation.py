@@ -5,6 +5,7 @@ import json
 import logging
 import sqlite3
 import sys
+import time
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -989,27 +990,64 @@ class CVAutomation:
         except ImportError as exc:  # pragma: no cover - dependência faltante
             raise ValueError("Pacote pywin32 é necessário para gerar PDF") from exc
 
+        pythoncom = None
         try:
-            # Abre uma instância isolada do Word para evitar interferir em sessões em uso.
-            word = win32com.client.DispatchEx("Word.Application")
+            import pythoncom  # type: ignore
+            pythoncom.CoInitialize()
+        except ImportError:
+            pythoncom = None
         except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"Não foi possível iniciar o Microsoft Word: {exc}") from exc
+            logger.warning("Falha ao inicializar pythoncom: %s", exc)
 
+        last_error: Exception | None = None
         try:
-            word.Visible = False
-            # Carrega o DOCX que acabou de ser produzido para reaproveitar o layout pronto.
-            doc = word.Documents.Open(str(source))
-            # Salva no formato PDF (código 17) garantindo equivalência ao arquivo original.
-            doc.SaveAs(str(destination), FileFormat=17)
-            doc.Close(False)
-        except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"Falha ao converter DOCX em PDF: {exc}") from exc
+            for attempt in range(3):
+                word = None
+                doc = None
+                try:
+                    word = win32com.client.DispatchEx("Word.Application")
+                    word.Visible = False
+                    word.DisplayAlerts = 0
+
+                    # ReadOnly evita conflitos de arquivo enquanto o Word prepara o PDF novo.
+                    doc = word.Documents.Open(str(source), ReadOnly=True)
+                    doc.SaveAs(str(destination), FileFormat=17)
+                    doc.Close(False)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    last_error = exc
+                    logger.warning(
+                        "Tentativa %d de converter %s->%s falhou: %s",
+                        attempt + 1,
+                        source,
+                        destination,
+                        exc,
+                    )
+                finally:
+                    if doc is not None:
+                        try:
+                            doc.Close(False)
+                        except Exception:  # noqa: BLE001
+                            pass
+                    if word is not None:
+                        try:
+                            word.Quit()
+                        except Exception:  # noqa: BLE001
+                            pass
+
+                if attempt < 2:
+                    time.sleep(1.5 * (attempt + 1))
+
         finally:
-            # Fecha o Word sempre, mesmo em caso de erro, para evitar processos órfãos.
-            try:
-                word.Quit()
-            except Exception:  # noqa: BLE001
-                pass
+            if pythoncom is not None:
+                try:
+                    pythoncom.CoUninitialize()
+                except Exception:  # noqa: BLE001
+                    pass
+
+        if last_error is None:
+            raise ValueError("Falha desconhecida ao converter DOCX em PDF")
+        raise ValueError(f"Falha ao converter DOCX em PDF: {last_error}") from last_error
 
     def _write_json(self, profile: FacultyProfile, destination: Path) -> None:
         destination.write_text(json.dumps(profile.to_serializable(), indent=2), encoding="utf-8")
