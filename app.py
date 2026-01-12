@@ -33,29 +33,41 @@ def get_faculty(faculty_id: int):
 
 
 @app.post("/export")
-def export_faculty():
-    """Gera o DOCX de um docente conforme a acreditação informada """
-    payload = request.get_json(force=False, silent=True) or {}
-    faculty_id = payload.get("id") or payload.get("faculty_id") or request.args.get("id")
+@app.post("/export/<int:faculty_id>")
+def export_faculty(faculty_id: int | None = None):
+    """Gera o artefato do docente no formato informado (docx ou pdf)."""
 
-    if not faculty_id:
+    payload = request.get_json(force=False, silent=True) or {}
+    payload_id = payload.get("id") or payload.get("faculty_id") or request.args.get("id")
+
+    if faculty_id is None and payload_id is None:
         return jsonify({"error": "Parâmetro 'id' é obrigatório"}), 400
 
+    if faculty_id is not None and payload_id is not None and str(payload_id) != str(faculty_id):
+        return jsonify({"error": "Identificadores divergentes entre URL e payload"}), 400
+
+    resolved_id = str(faculty_id if faculty_id is not None else payload_id)
+
+    export_format = (request.args.get("format") or "docx").strip().lower()
+    if export_format not in {"docx", "pdf"}:
+        return jsonify({"error": "Formato inválido. Utilize 'docx' ou 'pdf'."}), 400
+
     try:
-        metadata = automation_service.export_doc(str(faculty_id))
+        metadata = automation_service.export_artifact(resolved_id, export_format)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
     if metadata is None:
         return jsonify({"error": "Docente não encontrado"}), 404
 
-    docx_path = metadata.get("docx_path")
-    if docx_path:
-        metadata["docx_url"] = url_for(
-            "download_artifact",
-            resource=docx_path,
-            _external=True,
-        )
+    for key in ("docx_path", "pdf_path"):
+        artifact_path = metadata.get(key)
+        if artifact_path:
+            metadata[key.replace("_path", "_url")] = url_for(
+                "download_artifact",
+                resource=artifact_path,
+                _external=True,
+            )
 
     return jsonify(metadata)
 

@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import sqlite3
+import sys
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,7 +19,7 @@ from backend.core.config import OUTPUT_DIR, sqlite_path
 logger = logging.getLogger("cv_automation")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-# Estruturas de dados -------------------------------------------------------
+# Estruturas de dados 
 
 
 @dataclass
@@ -306,34 +307,74 @@ class CVAutomation:
 
         return results
 
+    def export_artifact(self, faculty_id: str, export_format: str) -> dict | None:
+        """Gera um artefato único no formato solicitado."""
+
+        normalized = (export_format or "").strip().lower()
+        if not normalized:
+            raise ValueError("Formato de exportação é obrigatório")
+
+        if normalized == "docx":
+            return self._export_docx(faculty_id)
+        if normalized == "pdf":
+            return self._export_pdf(faculty_id)
+
+        raise ValueError(f"Formato de exportação não suportado: {export_format}")
+
     def export_doc(self, faculty_id: str) -> dict | None:
-        """Gera apenas o DOCX para um docente específico """
+        """Compatibilidade retroativa: mantém a exportação em DOCX."""
 
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
-            profile = self._build_profile(conn, faculty_id)
+        return self._export_docx(faculty_id)
 
+    def _export_docx(self, faculty_id: str) -> dict | None:
+        profile = self._load_profile(faculty_id)
         if profile is None:
             return None
 
-        limited_profile = profile
-
         docx_path = self.output_root / f"{faculty_id}_{_slugify(profile.name)}.docx"
         docx_path.parent.mkdir(parents=True, exist_ok=True)
-        self._generate_document(limited_profile, docx_path)
+        self._generate_document(profile, docx_path)
 
-        metadata = {
+        return {
             "faculty_id": faculty_id,
             "name": profile.name,
             "docx_path": docx_path.relative_to(self.output_root).as_posix(),
         }
 
-        return metadata
+    def _export_pdf(self, faculty_id: str) -> dict | None:
+        # Reutiliza a geração original do DOCX para garantir layout idêntico.
+        docx_metadata = self._export_docx(faculty_id)
+        if docx_metadata is None:
+            return None
+
+        # O caminho relativo será usado tanto para manter o retorno legado quanto para localizar o arquivo.
+        docx_relative = docx_metadata.get("docx_path")
+        if not docx_relative:
+            return None
+
+        docx_path = (self.output_root / docx_relative).resolve()
+        pdf_path = docx_path.with_suffix(".pdf")
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Converte o DOCX recém-gerado preservando a formatação original.
+        self._convert_docx_to_pdf(docx_path, pdf_path)
+
+        return {
+            "faculty_id": docx_metadata.get("faculty_id", faculty_id),
+            "name": docx_metadata.get("name"),
+            "docx_path": docx_relative,
+            "pdf_path": pdf_path.relative_to(self.output_root).as_posix(),
+        }
 
     def _fetch_all_ids(self) -> list[str]:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.execute("SELECT id FROM base_de_dados_docente")
             return [str(row[0]) for row in cursor.fetchall()]
+
+    def _load_profile(self, faculty_id: str) -> FacultyProfile | None:
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            return self._build_profile(conn, faculty_id)
 
     def _build_profile(self, conn: sqlite3.Connection, faculty_id: str) -> FacultyProfile | None:
         """Lê todas as colunas necessárias para gerar um perfil completo """
@@ -855,7 +896,7 @@ class CVAutomation:
                     p = document.add_paragraph()
                     p.paragraph_format.space_after = Pt(4)
                     
-                    # 1. Número
+                    # Número
                     run_num = p.add_run(f"{idx}. ")
                     run_num.font.name = 'Times New Roman'
                     run_num.font.size = Pt(11)
@@ -883,6 +924,42 @@ class CVAutomation:
         document.core_properties.subject = f"{profile.name} CV"
         
         document.save(destination)
+
+    def _convert_docx_to_pdf(self, source: Path, destination: Path) -> None:
+        """Converte um DOCX já formatado em PDF reaproveitando o layout existente."""
+
+        if not source.exists():
+            raise ValueError(f"Arquivo DOCX {source} inexistente para conversão em PDF")
+
+        if sys.platform != "win32":
+            raise ValueError("Conversão para PDF requer Windows com Microsoft Word instalado")
+
+        try:
+            import win32com.client  # type: ignore
+        except ImportError as exc:  # pragma: no cover - dependência faltante
+            raise ValueError("Pacote pywin32 é necessário para gerar PDF") from exc
+
+        try:
+            # Abre uma instância isolada do Word para evitar interferir em sessões em uso.
+            word = win32com.client.DispatchEx("Word.Application")
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Não foi possível iniciar o Microsoft Word: {exc}") from exc
+
+        try:
+            word.Visible = False
+            # Carrega o DOCX que acabou de ser produzido para reaproveitar o layout pronto.
+            doc = word.Documents.Open(str(source))
+            # Salva no formato PDF (código 17) garantindo equivalência ao arquivo original.
+            doc.SaveAs(str(destination), FileFormat=17)
+            doc.Close(False)
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(f"Falha ao converter DOCX em PDF: {exc}") from exc
+        finally:
+            # Fecha o Word sempre, mesmo em caso de erro, para evitar processos órfãos.
+            try:
+                word.Quit()
+            except Exception:  # noqa: BLE001
+                pass
 
     def _write_json(self, profile: FacultyProfile, destination: Path) -> None:
         destination.write_text(json.dumps(profile.to_serializable(), indent=2), encoding="utf-8")
