@@ -6,10 +6,11 @@ import logging
 import sqlite3
 import sys
 import time
+import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Collection, Iterable, Sequence, cast
 
 from docx import Document
 from docx.shared import Pt, Inches, RGBColor
@@ -19,6 +20,9 @@ from backend.core.config import OUTPUT_DIR, sqlite_path
 
 logger = logging.getLogger("cv_automation")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+# Campos de creditação presentes na tabela de alocação agregada.
+ACCREDITATION_COLUMNS = ("AACSB", "EQUIS", "AMBA", "ABET")
 
 # Estruturas de dados 
 
@@ -192,6 +196,27 @@ class FacultyProfile:
             ],
         }
 
+
+def _normalize_token(value: str | None) -> str | None:
+    """Normaliza chaves textuais removendo espaços, acentos e padronizando caixa."""
+    if value is None:
+        return None
+    trimmed = " ".join(value.strip().split())
+    if not trimmed:
+        return None
+    decomposed = unicodedata.normalize("NFD", trimmed)
+    stripped = "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
+    return stripped.upper() or None
+
+
+def _truthy_flag(value: str | None) -> bool:
+    """Converte indicadores textuais em booleano para colunas de creditação."""
+    if value is None:
+        return False
+    normalized = value.strip().upper()
+    return normalized in {"SIM", "YES", "TRUE", "1", "Y"}
+
+
 class CVAutomation:
     def __init__(self, output_root: Path = OUTPUT_DIR):
         """Configura caminho do banco e da pasta de saída """
@@ -308,35 +333,115 @@ class CVAutomation:
 
         return results
 
-    def fetch_profiles_summary(self, *, offset: int = 0, limit: int = 50) -> tuple[list[dict], int]:
+    def fetch_profiles_summary(
+        self,
+        *,
+        offset: int = 0,
+        limit: int = 50,
+        allocated_only: bool = True,
+        accreditations: Collection[str] | None = None,
+    ) -> tuple[list[dict], int]:
         """Lê apenas os campos essenciais para montar os cards rapidamente."""
         if limit <= 0:
             raise ValueError("O parâmetro 'limit' deve ser positivo")
+
         capped_limit = min(limit, 50)
         safe_offset = max(offset, 0)
+        accreditation_filter = {
+            item.strip().upper()
+            for item in (accreditations or [])
+            if isinstance(item, str) and item.strip()
+        }
 
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
-            total_row = conn.execute(
-                "SELECT COUNT(1) AS total FROM base_de_dados_docente"
-            ).fetchone()
-            total = int(total_row["total"] if total_row is not None else 0)
 
-            rows = conn.execute(
+            base_rows = conn.execute(
                 """
                 SELECT id, nome_padrao, area, nova_area, unid_acad
                 FROM base_de_dados_docente
-                ORDER BY nome_padrao
-                LIMIT ? OFFSET ?
-                """,
-                (capped_limit, safe_offset),
+                """
             ).fetchall()
 
+            try:
+                detail_rows = conn.execute(
+                    """
+                    SELECT nome_completo, disciplina
+                    FROM alocacao_2026_1_reldetalhe
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError:
+                detail_rows = []
+
+            try:
+                accreditation_rows = conn.execute(
+                    """
+                    SELECT DISCIPLINA, AACSB, EQUIS, AMBA, ABET
+                    FROM alocacao_26_1
+                    """
+                ).fetchall()
+            except sqlite3.OperationalError:
+                accreditation_rows = []
+
+        # Constrói mapa de disciplinas para os selos de creditação marcados como "SIM".
+        discipline_accreditations: dict[str, set[str]] = {}
+        for row in accreditation_rows:
+            discipline_key = _normalize_token(row["DISCIPLINA"])
+            if not discipline_key:
+                continue
+
+            flags = {
+                column
+                for column in ACCREDITATION_COLUMNS
+                if _truthy_flag(row[column])
+            }
+            if not flags:
+                continue
+            discipline_accreditations.setdefault(discipline_key, set()).update(flags)
+
+        # Indexa docentes alocados com contagem e creditações derivadas das disciplinas.
+        allocation_index: dict[str, dict[str, Any]] = {}
+        for row in detail_rows:
+            name_key = _normalize_token(row["nome_completo"])
+            if not name_key:
+                continue
+
+            entry = allocation_index.setdefault(
+                name_key,
+                {"count": 0, "accreditations": set()},
+            )
+            entry["count"] = int(entry["count"]) + 1
+
+            discipline_key = _normalize_token(row["disciplina"])
+            if discipline_key and discipline_key in discipline_accreditations:
+                acc_set = cast(set[str], entry["accreditations"])
+                acc_set.update(discipline_accreditations[discipline_key])
+
         summaries: list[dict] = []
-        for row in rows:
+        for row in base_rows:
             faculty_id = row["id"]
-            name = (row["nome_padrao"] or "").strip()
-            if not faculty_id or not name:
+            name_raw = (row["nome_padrao"] or "").strip()
+            if not faculty_id or not name_raw:
+                continue
+
+            name_key = _normalize_token(name_raw)
+            allocation_data = allocation_index.get(name_key or "")
+            allocation_count = int(allocation_data["count"]) if allocation_data else 0
+            accreditation_values = (
+                sorted(cast(set[str], allocation_data["accreditations"]))
+                if allocation_data
+                else []
+            )
+            accreditation_set = set(accreditation_values)
+            has_allocation = allocation_count > 0
+
+            if allocated_only and not has_allocation:
+                continue
+
+            if accreditation_filter and not accreditation_set.intersection(accreditation_filter):
+                continue
+
+            if not accreditation_values:
                 continue
 
             area_code = (row["area"] or "").strip()
@@ -350,13 +455,21 @@ class CVAutomation:
             summaries.append(
                 {
                     "id": str(faculty_id),
-                    "name": name,
+                    "name": name_raw,
                     "area": area_value,
                     "unit": unit_value,
+                    "allocation_count": allocation_count,
+                    "accreditations": accreditation_values,
+                    "has_allocation": has_allocation,
                 }
             )
 
-        return summaries, total
+        summaries.sort(key=lambda item: item["name"].lower())
+        total = len(summaries)
+
+        start = min(safe_offset, total)
+        end = min(start + capped_limit, total)
+        return summaries[start:end], total
 
     def export_artifact(self, faculty_id: str, export_format: str) -> dict | None:
         """Gera um artefato único no formato solicitado."""

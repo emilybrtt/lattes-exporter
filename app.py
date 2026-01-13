@@ -31,15 +31,29 @@ def list_faculty_summary():
 
     raw_page = request.args.get("page", default=1, type=int) or 1
     raw_per_page = request.args.get("per_page", default=50, type=int) or 50
+    allocated_only_raw = request.args.get("allocated_only")
+    accreditation_filters = [
+        item.strip()
+        for item in request.args.getlist("accreditation")
+        if isinstance(item, str) and item.strip()
+    ]
 
     page = max(raw_page, 1)
     per_page = min(max(raw_per_page, 1), 50)
     offset = (page - 1) * per_page
 
+    if allocated_only_raw is None:
+        allocated_only = True
+    else:
+        normalized_allocated = allocated_only_raw.strip().lower()
+        allocated_only = normalized_allocated not in {"0", "false", "no", "nao", "não"}
+
     try:
         summaries, total = automation_service.fetch_profiles_summary(
             offset=offset,
             limit=per_page,
+            allocated_only=allocated_only,
+            accreditations=accreditation_filters,
         )
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
@@ -52,6 +66,8 @@ def list_faculty_summary():
         summaries, total = automation_service.fetch_profiles_summary(
             offset=offset,
             limit=per_page,
+            allocated_only=allocated_only,
+            accreditations=accreditation_filters,
         )
     elif total == 0:
         page = 1
