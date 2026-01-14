@@ -5,7 +5,9 @@ from math import ceil
 from dotenv import load_dotenv
 from flask import Flask, abort, jsonify, request, send_file, url_for
 from flask_cors import CORS
+from werkzeug.utils import secure_filename
 
+from backend.core.database import reload_table_from_upload
 from backend.services.automation import CVAutomation
 
 load_dotenv()
@@ -179,6 +181,35 @@ def automation_run():
         return jsonify({"error": str(exc)}), 400
 
     return jsonify({"generated": len(metadata), "artifacts": metadata})
+
+
+@app.post("/tables/<string:table_key>/upload")
+def upload_table(table_key: str):
+    """Carrega manualmente uma tabela suportada com base em um arquivo enviado."""
+
+    file_storage = request.files.get("file")
+    if file_storage is None or not file_storage.filename:
+        return jsonify({"error": "Envie um arquivo no campo 'file'."}), 400
+
+    safe_name = secure_filename(file_storage.filename) or file_storage.filename
+
+    try:
+        payload = file_storage.read()
+        result = reload_table_from_upload(table_key, payload, filename=safe_name)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:  # noqa: BLE001
+        app.logger.exception("Falha ao carregar tabela %s: %s", table_key, exc)
+        return jsonify({"error": "Falha interna ao processar o arquivo."}), 500
+
+    response = {
+        "message": "Tabela carregada com sucesso.",
+        "table": result["table"],
+        "rows": result["rows"],
+        "columns": result["columns"],
+        "source": result["source"],
+    }
+    return jsonify(response), 200
 
 
 if __name__ == "__main__":
