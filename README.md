@@ -1,103 +1,117 @@
 # Lattes Exporter
 
-Pipeline completo para gerar pacotes de currículo (DOCX + JSON) a partir dos dados consolidados dos docentes, com backend em Flask/SQLite e frontend em React Router.
+Pipeline completo para gerar pacotes de currículo (DOCX + JSON) a partir dos dados consolidados dos docentes. O projeto combina um backend Flask/SQLite e um frontend React Router com foco em atualização rápida de datasets e exportação em lote.
 
 ---
 
 ## Visão Geral
-- Ingestão dos CSVs do Lattes para um banco SQLite local gerenciado pelo backend.
-- Serviço Flask expõe endpoints REST para listar docentes, exportar CVs e distribuir artefatos gerados.
-- Frontend React (TypeScript + shadcn/ui) oferece um painel para selecionar docentes, disparar exportações e baixar arquivos.
+- Banco SQLite construído a partir de planilhas CSV/XLSX do Lattes.
+- Backend Flask expõe endpoints REST para listar docentes, atualizar tabelas manualmente e gerar artefatos.
+- Frontend em React Router (TypeScript + shadcn/ui) oferece painel com filtros avançados, busca textual e exportação em lote.
 
 ---
 
 ## Arquitetura
 
 ### Backend (Python 3.11)
-- [backend/core/database.py](backend/core/database.py): carrega os CSVs descritos em `CSV_SPECS`, criando/atualizando `data/lattes.sqlite3`.
-- [backend/services/automation.py](backend/services/automation.py): monta o perfil completo do docente, gera JSON serializado e usa python-docx para produzir o DOCX.
-- [app.py](app.py): aplica Flask + CORS e expõe os endpoints HTTP abaixo:
-  - `GET /` – lista todos os docentes já formatados para JSON (`{ total, result }`).
-  - `GET /<id>` – retorna o perfil de um docente específico.
-  - `POST /export` – dispara a geração do DOCX (já existente) e devolve metadados com `docx_url` pronto para download.
-  - `GET /artifacts/<path>` – novo endpoint que disponibiliza qualquer artefato gerado de forma segura (usa `automation_service.output_root`).
-  - `POST /automation/run` e `GET /automation/status` – utilitários para execuções em lote e inspeção de saídas.
+- [backend/core/database.py](backend/core/database.py):
+  - Mapeia arquivos suportados via `CSV_SPECS`, incluindo tabelas de alocação.
+  - Disponibiliza `reload_table_from_upload`, que aceita CSV ou XLSX (delimitadores automáticos) e recria a tabela SQLite.
+- [backend/services/automation.py](backend/services/automation.py):
+  - Consolida dados dos docentes (dados básicos, experiências, produções e creditações).
+  - Gera documentos DOCX a partir de templates (python-docx) e registra metadados dos artefatos.
+- [app.py](app.py): endpoints principais:
+  - `GET /summary` – lista paginada de docentes (com filtros por acreditação e flag de alocação).
+  - `GET /<id>` – perfil completo de um docente.
+  - `POST /export` – gera docx/pdf e retorna metadados com URLs de download.
+  - `POST /tables/<table_key>/upload` – upload manual de planilhas (`file` em multipart) para qualquer tabela cadastrada.
+  - `GET /artifacts/<path>` – download seguro do artefato gerado.
+  - `POST /automation/run` / `GET /automation/status` – execução em lote por acreditação.
 
 ### Frontend (React Router + Vite)
-- Código em [frontend/app](frontend/app) criado via `create-react-router@latest` com TypeScript.
-- UI construída com componentes do shadcn/ui (Button, Select, Dialog) adicionados via CLI.
-- [frontend/app/routes/app.tsx](frontend/app/routes/app.tsx) implementa o painel:
-  - Carrega docentes do backend com `GET /`.
-  - Ao selecionar um docente, abre um diálogo para exportar DOCX (PDF placeholder).
-  - Exibe link direto de download fornecido por `docx_url`.
-- Tipos e cliente HTTP em [frontend/app/lib/api.ts](frontend/app/lib/api.ts).
+- Tudo em [frontend/app](frontend/app) com JSX server-first via `react-router@7`.
+- Componentes estilizados com shadcn/ui + Tailwind.
+- [frontend/app/components/export-panel.tsx](frontend/app/components/export-panel.tsx):
+  - Busca textual (nome, email, área, unidade), filtros por área/unidade/acreditação, modos grid/tabela.
+  - Seleção em lote com exportação DOCX/PDF e resumo de downloads.
+- [frontend/app/routes/datasets.upload.tsx](frontend/app/routes/datasets.upload.tsx):
+  - Página para carregar planilhas (CSV/XLSX) via API `/tables/<table_key>/upload` com feedback visual e coluna preview.
+- [frontend/app/lib/api.ts](frontend/app/lib/api.ts): cliente HTTP tipado (fetch) com normalização de payloads.
 
 ---
 
-## Fontes de Dados
+## Fontes de Dados Suportadas
 - `data/base-de-dados-docente.csv`
 - `data/docentes-experiencia-profissional.csv`
-- `data/producao_docentes_detalhado.csv` (primeira linha é metadado e é ignorada pela importação)
+- `data/producao_docentes_detalhado.csv` (ignora a primeira linha de metadados)
+- `data/alocacao_2026_1_reldetalhe.csv` (mapeamento docente ↔ disciplina)
+- `data/alocacao_26_1.csv` (matriz de selos AACSB/EQUIS/AMBA/ABET)
+
+Qualquer upload manual aceita CSV com delimitador `,`, `;`, `\t`, `|` ou XLSX (`openpyxl`).
 
 ---
 
-## Preparação do Ambiente
+## Configuração do Ambiente
 
 ### Backend
-1. **Ativar o ambiente virtual**
-   - PowerShell: `env\Scripts\Activate.ps1`
-2. **Instalar/atualizar dependências** (se necessário):
-   - `pip install -r requirements.txt`
-3. **Popular o banco SQLite (apenas primeira execução ou quando os CSVs mudarem)**
-   - `python -m backend.core.database`
-4. **Executar o servidor Flask**
-   - `python app.py`
-   - O backend roda em `http://localhost:5000`.
+1. Ative o ambiente virtual
+   ```powershell
+   env\Scripts\Activate.ps1
+   ```
+2. Instale as dependências
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Execute o servidor Flask
+   ```bash
+   python app.py
+   ```
+   O backend fica em `http://localhost:5000`.
 
 ### Frontend
-1. **Instalar dependências**
-   - `cd frontend`
-   - `npm install`
-2. **Verificar tipos (opcional)**
-   - `npm run typecheck`
-3. **Rodar o servidor de desenvolvimento**
-   - `npm run dev`
-   - A aplicação fica disponível em `http://localhost:5173`.
+1. Instale dependências
+   ```bash
+   cd frontend
+   npm install
+   ```
+2. Inicie o modo desenvolvimento
+   ```bash
+   npm run dev
+   ```
+   A interface abre em `http://localhost:5173/app` (rotas internas `/app` e `/datasets/upload`).
 
-Garanta que o backend esteja ativo antes de abrir o painel, pois o frontend consome diretamente os endpoints em `http://localhost:5000`.
+Variável opcional: defina `VITE_API_BASE_URL` para apontar para outro backend.
 
 ---
 
-## Fluxo de Uso
-1. Inicie o backend (`python app.py`).
-2. Inicie o frontend (`npm run dev`) e abra `/app` no navegador.
-3. Escolha um docente no seletor. O diálogo exibirá os formatos disponíveis.
-4. Clique em **Exportar DOCX** para gerar o arquivo e use o link "baixar arquivo" que aponta para `/artifacts/<arquivo>`.
-5. Os arquivos continuam disponíveis em `backend/exports/output/<accreditation>/`.
+## Fluxos Principais
+1. **Atualizar dados via UI**: abra `/datasets/upload`, envie novos CSV/XLSX para cada tabela, verifique contagem/colunas retornadas.
+2. **Navegar no painel**: em `/app` utilize busca e filtros para localizar docentes. Use “Selecionar todos” e exporte em DOCX ou PDF.
+3. **Downloads**: após exportar, links ficam disponíveis tanto no modal quanto via `/artifacts/<path>`.
 
-CLI alternativa (sem frontend):
+CLI (automatização):
 - `python -m backend.services.automation --accreditation AACSB`
-- `python -m backend.services.automation --accreditation AACSB --faculty 1 2 3`
+- `python -m backend.services.automation --accreditation AACSB --faculty 123 456`
 
 ---
 
 ## Notas Técnicas
-- Logs do backend: console padrão (usa `logging` com nível `INFO`).
-- `CSV_SPECS` em [backend/core/database.py](backend/core/database.py#L19-L35) controla a ordem/nomes dos CSVs.
-- O endpoint `/artifacts/<path>` valida o caminho para evitar acesso fora da pasta configurada (`automation_service.output_root`).
-- O frontend usa `VITE_API_BASE_URL` caso definido; senão, assume `http://localhost:5000`.
+- Logs configurados com `logging.basicConfig(level=logging.INFO)`.
+- Sanitização de colunas no SQLite garante nomes `snake_case` sem caracteres especiais.
+- Uploads derrubam e recriam a tabela alvo dentro de uma transação SQLite.
+- Busca do frontend normaliza texto para remover acentos antes de comparar.
+- Exportação PDF reutiliza o DOCX gerado e converte via automação (python-docx + pipeline de exportação).
 
 ---
 
 ## Solução de Problemas
-- **Docentes não aparecem no painel:** confirme se o backend responde em `http://localhost:5000/`. Use `curl` ou `Invoke-WebRequest` para inspecionar o retorno.
-- **Exportação retorna erro:** o backend devolve mensagens JSON descrevendo o problema (`Docente não encontrado`, parâmetros ausentes, etc.).
-- **Arquivo não baixa:** verifique se os DOCX estão sendo criados em `backend/exports/output` e se o caminho retornado em `docx_url` está acessível.
-- **Mudanças nos CSVs:** ajuste o sanitizador de colunas em `backend/core/database.py` e reimporte os dados.
+- **Nenhum docente exibido**: confirme `/summary` no backend e se as planilhas de alocação foram atualizadas (nomes devem coincidir).
+- **Erro no upload**: resposta contém `error`. Verifique se o arquivo está no formato CSV/XLSX e se o cabeçalho não está vazio.
+- **Artefato não abre**: confirme que `backend/exports/output/<accreditation>/` contém o arquivo e que `/artifacts/…` retorna 200.
 
 ---
 
 ## Próximos Passos
-- Implementar exportação em PDF para habilitar o botão já disponível no diálogo.
-- Adicionar testes automatizados (unitários e E2E) para ingestão, geração de DOCX e chamadas do frontend.
-- Publicar documentação de API (OpenAPI/Swagger) para facilitar integrações externas.
+- Cobrir `/tables/<table_key>/upload` e `/summary` com testes automatizados.
+- Adicionar autenticação (JWT/Keycloak) para restringir uploads e exportações.
+- Publicar documentação OpenAPI do backend.
