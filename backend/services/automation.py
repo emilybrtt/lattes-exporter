@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sqlite3
 import sys
 import time
@@ -23,6 +24,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 # Campos de creditação presentes na tabela de alocação agregada.
 ACCREDITATION_COLUMNS = ("AACSB", "EQUIS", "AMBA", "ABET")
+
+# Janelas utilizadas para filtrar experiência profissional e produção intelectual.
+EXPERIENCE_WINDOW_YEARS = 12
+PRODUCTION_WINDOW_YEARS = 6
+
+_YEAR_PATTERN = re.compile(r"(19|20)\d{2}")
 
 # Estruturas de dados 
 
@@ -595,17 +602,28 @@ class CVAutomation:
             return None
 
         # Carrega listas auxiliares (experiência, educação, produção).
-        experiences = list(self._load_experience(conn, faculty_row["id"]))
+        reference_point = datetime.utcnow()
+        experiences = [
+            entry
+            for entry in self._load_experience(conn, faculty_row["id"])
+            if entry.is_within_window(EXPERIENCE_WINDOW_YEARS, reference_point)
+        ]
         education = _build_education_records(faculty_row)
         try:
-            productions = list(self._load_production(conn, faculty_row["nome_padrao"]))
+            raw_productions = list(self._load_production(conn, faculty_row["nome_padrao"]))
         except sqlite3.Error as exc:
             logger.warning(
                 "Skipping production data for %s due to database error: %s",
                 faculty_row["nome_padrao"],
                 exc,
             )
-            productions = []
+            raw_productions = []
+
+        productions = [
+            entry
+            for entry in raw_productions
+            if _production_is_recent(entry, reference_point.year, PRODUCTION_WINDOW_YEARS)
+        ]
 
         return FacultyProfile(
             faculty_id=str(faculty_row["id"]),
@@ -1208,6 +1226,28 @@ def _build_education_records(row: sqlite3.Row) -> list[EducationRecord]:
             )
         )
     return education
+
+
+def _production_is_recent(entry: ProductionEntry, reference_year: int, window_years: int) -> bool:
+    """Indica se a produção está dentro da janela de anos configurada."""
+    extracted_year = _extract_year(entry.year)
+    if extracted_year is None:
+        return False
+    cutoff_year = reference_year - window_years + 1
+    return extracted_year >= cutoff_year
+
+
+def _extract_year(value: str | None) -> int | None:
+    """Tenta localizar um ano de quatro dígitos no texto informado."""
+    if not value:
+        return None
+    match = _YEAR_PATTERN.search(str(value))
+    if not match:
+        return None
+    try:
+        return int(match.group(0))
+    except ValueError:
+        return None
 
 
 def _parse_date(raw: str | None) -> datetime | None:
