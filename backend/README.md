@@ -45,6 +45,7 @@ Banco SQLite padrão: `data/lattes.sqlite3` (configurável via `LATTES_SQLITE_PA
 - `python app.py` – inicia o servidor.
 - `python -m backend.core.database` – (re)inicializa o banco a partir dos CSVs padrão.
 - `python -m backend.services.automation --accreditation AACSB` – gera DOCX/JSON para uma acreditação inteira.
+- `python -m unittest backend.tests.test_database_upload` – executa os testes automatizados de upload de tabelas.
 
 Logs ficam no stdout com nível `INFO`.
 

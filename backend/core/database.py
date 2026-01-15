@@ -8,6 +8,7 @@ from typing import Iterable
 from dotenv import load_dotenv
 
 import pandas as pd
+from pandas.errors import DatabaseError as PandasDatabaseError
 
 from .config import DATA_DIR, sqlite_path
 
@@ -221,7 +222,7 @@ def reload_table_from_upload(table_key: str, file_bytes: bytes, *, filename: str
             existing_frame = existing_frame.fillna("")
             existing_frame = existing_frame.astype(str)
             existing_columns = list(existing_frame.columns)
-        except sqlite3.OperationalError:
+        except (sqlite3.OperationalError, PandasDatabaseError):
             existing_frame = None
             existing_columns = []
 
