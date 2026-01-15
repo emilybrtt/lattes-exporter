@@ -21,14 +21,18 @@ Banco SQLite padrão: `data/lattes.sqlite3` (configurável via `LATTES_SQLITE_PA
 | GET    | `/<id>` | Retorna o perfil completo (JSON) do docente. |
 | POST   | `/export` | Gera artefato DOCX/PDF para o docente informado (`id` ou `faculty_id`). |
 | GET    | `/artifacts/<path>` | Download seguro para arquivos gerados. |
-| POST   | `/tables/<table_key>/upload` | Substitui uma tabela a partir de CSV/XLSX enviado em `file`. |
+| POST   | `/tables/<table_key>/upload` | Atualiza/mescla uma tabela a partir de CSV/XLSX enviado em `file`. |
 | POST   | `/automation/run` | Executa geração em lote por acreditação (opcionalmente lista de IDs). |
 | GET    | `/automation/status` | Lista diretórios/acreditações já exportadas. |
 
 ### Upload de tabelas (`/tables/<table_key>/upload`)
 - `table_key` aceita tanto o nome da tabela (`base_de_dados_docente`) quanto alias (`alocacao`).
 - Formatos aceitos: CSV (`sep` autodetectado) e XLSX.
-- A tabela é recriada dentro de uma transação; se algo falha, rollback automático.
+- As colunas precisam casar exatamente com as do dataset oficial (o arquivo base ou a tabela já existente); envios com colunas faltantes/extras são recusados.
+- As linhas são mescladas com o conteúdo já existente:
+  - Linhas duplicadas (idênticas) são coalescidas mantendo a versão mais recente.
+  - Demais tabelas não são afetadas.
+- A recriação da tabela ocorre dentro de uma transação; em caso de erro, é feito rollback completo.
 - Exemplo cURL:
   ```bash
   curl -F "file=@data/base-de-dados-docente.csv" \

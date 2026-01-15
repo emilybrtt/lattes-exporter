@@ -95,6 +95,38 @@ def _resolve_table_spec(raw_key: str) -> dict:
     return spec
 
 
+def _load_expected_columns(spec: dict) -> list[str]:
+    """Returns the sanitized column names expected for a table, from default CSV if available."""
+    data_path = DATA_DIR / spec["filename"]
+    if not data_path.exists():
+        return []
+
+    skip_rows = spec.get("skip_rows", 0)
+    try:
+        if data_path.suffix.lower() == ".csv":
+            with data_path.open(mode="r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.reader(handle)
+                for _ in range(skip_rows):
+                    next(reader, None)
+                headers = next(reader, None)
+        else:
+            frame = pd.read_excel(
+                data_path,
+                skiprows=skip_rows,
+                dtype=str,
+                engine="openpyxl",
+                nrows=0,
+            )
+            headers = list(frame.columns)
+    except Exception:  # noqa: BLE001
+        return []
+
+    if not headers:
+        return []
+
+    return _sanitize_columns([str(header) for header in headers])
+
+
 def _prepare_rows(frame: pd.DataFrame) -> Iterable[tuple[str, ...]]:
     """Converts a dataframe to a sequence of UTF-8 safe string tuples."""
     cleaned = frame.fillna("")
@@ -176,29 +208,88 @@ def reload_table_from_upload(table_key: str, file_bytes: bytes, *, filename: str
         raise ValueError("Nenhuma coluna foi encontrada no arquivo enviado.")
 
     frame.columns = columns
-    rows = list(_prepare_rows(frame))
+
+    existing_frame: pd.DataFrame | None = None
+    existing_columns: list[str] = []
+
+    with sqlite3.connect(DB_PATH) as conn:
+        try:
+            existing_frame = pd.read_sql_query(
+                f'SELECT * FROM "{spec["table"]}"',
+                conn,
+            )
+            existing_frame = existing_frame.fillna("")
+            existing_frame = existing_frame.astype(str)
+            existing_columns = list(existing_frame.columns)
+        except sqlite3.OperationalError:
+            existing_frame = None
+            existing_columns = []
+
+    expected_columns = existing_columns or _load_expected_columns(spec)
+    if expected_columns:
+        uploaded_set = set(columns)
+        expected_set = set(expected_columns)
+        missing = sorted(expected_set - uploaded_set)
+        unexpected = sorted(uploaded_set - expected_set)
+        if missing or unexpected:
+            problems: list[str] = []
+            if missing:
+                problems.append("faltando: " + ", ".join(missing))
+            if unexpected:
+                problems.append("não reconhecidas: " + ", ".join(unexpected))
+            details = "; ".join(problems)
+            raise ValueError(
+                "Colunas inválidas para a tabela "
+                + spec["table"]
+                + (f" ({details})." if details else ".")
+            )
+        ordered_columns = expected_columns
+    else:
+        ordered_columns = columns
+
+    frame = frame.reindex(columns=ordered_columns, fill_value="")
+
+    if existing_frame is not None:
+        existing_frame = existing_frame.reindex(columns=ordered_columns, fill_value="")
+
+    merged_upload = frame
+
+    combined = (
+        pd.concat([existing_frame, merged_upload], ignore_index=True) if existing_frame is not None else merged_upload
+    )
+
+    if not combined.empty:
+        combined = combined.fillna("")
+        combined = combined.drop_duplicates(keep="last")
+
+    merged_rows = [
+        tuple("" if value is None else str(value) for value in row)
+        for row in combined.itertuples(index=False, name=None)
+    ]
 
     with sqlite3.connect(DB_PATH) as conn:
         cur = conn.cursor()
-        columns_sql = ", ".join(f'"{column}" TEXT' for column in columns)
+        columns_sql = ", ".join(f'"{column}" TEXT' for column in ordered_columns)
         cur.execute(f'DROP TABLE IF EXISTS "{spec["table"]}"')
         cur.execute(f'CREATE TABLE "{spec["table"]}" ({columns_sql})')
 
-        if rows:
-            placeholders = ", ".join("?" for _ in columns)
-            columns_list = ", ".join(f'"{column}"' for column in columns)
+        if merged_rows:
+            placeholders = ", ".join("?" for _ in ordered_columns)
+            columns_list = ", ".join(f'"{column}"' for column in ordered_columns)
             cur.executemany(
                 f'INSERT INTO "{spec["table"]}" ({columns_list}) VALUES ({placeholders})',
-                rows,
+                merged_rows,
             )
 
         conn.commit()
 
+    previous_count = len(existing_frame) if existing_frame is not None else 0
     return {
         "table": spec["table"],
-        "rows": len(rows),
-        "columns": columns,
+        "rows": len(merged_rows),
+        "columns": ordered_columns,
         "source": filename,
+        "added": max(len(merged_rows) - previous_count, 0),
     }
 
 
