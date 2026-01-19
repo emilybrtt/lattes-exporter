@@ -41,11 +41,11 @@ Pipeline completo para gerar pacotes de currículo (DOCX + JSON) a partir dos da
 ---
 
 ## Fontes de Dados Suportadas
-- `data/base-de-dados-docente.csv`
-- `data/docentes-experiencia-profissional.csv`
-- `data/producao_docentes_detalhado.csv` (ignora a primeira linha de metadados)
-- `data/alocacao_2026_1_reldetalhe.csv` (mapeamento docente ↔ disciplina)
-- `data/alocacao_26_1.csv` (matriz de selos AACSB/EQUIS/AMBA/ABET)
+- [data/base-de-dados-docente.csv](data/base-de-dados-docente.csv)
+- [data/docentes-experiencia-profissional.csv](data/docentes-experiencia-profissional.csv)
+- [data/producao_docentes_detalhado.csv](data/producao_docentes_detalhado.csv) (ignora a primeira linha de metadados)
+- [data/Alocacao_2026 1_Rel_Detalhe.csv](data/Alocacao_2026%201_Rel_Detalhe.csv) (aceita também uploads como alocacao_2026_1_reldetalhe.csv e alocacao-2026-1-reldetalhe.csv)
+- [data/alocacao-26-1.csv](data/alocacao-26-1.csv) (aceita também uploads como alocacao_26_1.csv)
 
 Qualquer upload manual aceita CSV com delimitador `,`, `;`, `\t`, `|` ou XLSX (`openpyxl`).
 

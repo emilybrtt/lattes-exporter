@@ -20,6 +20,18 @@ connection: sqlite3.Connection | None = None
 cursor: sqlite3.Cursor | None = None
 
 # Lista qual arquivo CSV deve alimentar qual tabela no SQLite
+def _candidate_filenames(spec: dict) -> list[str]:
+    candidates = []
+    primary = spec.get("filename")
+    if isinstance(primary, str) and primary:
+        candidates.append(primary)
+    for alt in spec.get("alternate_filenames", []):
+        if isinstance(alt, str) and alt:
+            if alt not in candidates:
+                candidates.append(alt)
+    return candidates
+
+
 CSV_SPECS = (
     {
         "filename": "base-de-dados-docente.csv",
@@ -40,6 +52,10 @@ CSV_SPECS = (
         "filename": "alocacao_2026_1_reldetalhe.csv",
         "table": "alocacao_2026_1_reldetalhe",
         "skip_rows": 1,
+        "alternate_filenames": [
+            "Alocacao_2026 1_Rel_Detalhe.csv",
+            "alocacao-2026-1-reldetalhe.csv",
+        ],
         "aliases": [
             "alocacao_detalhe",
             "alocacao_relatorio",
@@ -50,6 +66,10 @@ CSV_SPECS = (
         "filename": "alocacao_26_1.csv",
         "table": "alocacao_26_1",
         "skip_rows": 0,
+        "alternate_filenames": [
+            "alocacao-26-1.csv",
+            "Alocacao-26-1.csv",
+        ],
         "aliases": [
             "alocacao",
             "alocacao_matriz",
@@ -67,8 +87,9 @@ def _build_alias_lookup() -> tuple[dict[str, dict], dict[str, dict]]:
         normalized_table = spec["table"].lower()
         table_map[normalized_table] = spec
 
-        base_alias = spec["filename"].split(".")[0].replace("-", "_").lower()
-        alias_map[base_alias] = spec
+        for candidate in _candidate_filenames(spec):
+            base_alias = candidate.split(".")[0].replace("-", "_").replace(" ", "_").lower()
+            alias_map.setdefault(base_alias, spec)
 
         for alias in spec.get("aliases", []):
             if not isinstance(alias, str):
@@ -96,10 +117,18 @@ def _resolve_table_spec(raw_key: str) -> dict:
     return spec
 
 
+def _find_data_file(spec: dict) -> Path | None:
+    for candidate in _candidate_filenames(spec):
+        candidate_path = DATA_DIR / candidate
+        if candidate_path.exists():
+            return candidate_path
+    return None
+
+
 def _load_expected_columns(spec: dict) -> list[str]:
     """Returns the sanitized column names expected for a table, from default CSV if available."""
-    data_path = DATA_DIR / spec["filename"]
-    if not data_path.exists():
+    data_path = _find_data_file(spec)
+    if data_path is None:
         return []
 
     skip_rows = spec.get("skip_rows", 0)
@@ -227,26 +256,32 @@ def reload_table_from_upload(table_key: str, file_bytes: bytes, *, filename: str
             existing_columns = []
 
     expected_columns = existing_columns or _load_expected_columns(spec)
-    if expected_columns:
-        uploaded_set = set(columns)
-        expected_set = set(expected_columns)
-        missing = sorted(expected_set - uploaded_set)
-        unexpected = sorted(uploaded_set - expected_set)
-        if missing or unexpected:
-            problems: list[str] = []
-            if missing:
-                problems.append("faltando: " + ", ".join(missing))
-            if unexpected:
-                problems.append("não reconhecidas: " + ", ".join(unexpected))
-            details = "; ".join(problems)
-            raise ValueError(
-                "Colunas inválidas para a tabela "
-                + spec["table"]
-                + (f" ({details})." if details else ".")
-            )
-        ordered_columns = expected_columns
-    else:
-        ordered_columns = columns
+    if not expected_columns:
+        reference_file = _find_data_file(spec)
+        base_name = reference_file.name if reference_file is not None else spec.get("filename", "arquivo de referência")
+        raise ValueError(
+            "Não foi possível validar as colunas esperadas para a tabela "
+            + spec["table"]
+            + f". Certifique-se de que {base_name} esteja presente na pasta de dados."
+        )
+
+    uploaded_set = set(columns)
+    expected_set = set(expected_columns)
+    missing = sorted(expected_set - uploaded_set)
+    unexpected = sorted(uploaded_set - expected_set)
+    if missing or unexpected:
+        problems: list[str] = []
+        if missing:
+            problems.append("faltando: " + ", ".join(missing))
+        if unexpected:
+            problems.append("não reconhecidas: " + ", ".join(unexpected))
+        details = "; ".join(problems)
+        raise ValueError(
+            "Colunas inválidas para a tabela "
+            + spec["table"]
+            + (f" ({details})." if details else ".")
+        )
+    ordered_columns = expected_columns
 
     frame = frame.reindex(columns=ordered_columns, fill_value="")
 
@@ -316,51 +351,51 @@ def _sanitize_columns(headers: list[str]) -> list[str]:
 def _load_csv_into_table(
     cur: sqlite3.Cursor, csv_path: Path, table_name: str, skip_rows: int = 0
 ) -> None:
-	"""Lê um CSV e insere seu conteúdo na tabela informada, pulando linhas extras se preciso."""
-	if not csv_path.exists():
-		print(f"Error loading {csv_path.name}: file not found.")
-		return
+    """Lê um CSV e insere seu conteúdo na tabela informada, pulando linhas extras se preciso."""
+    if not csv_path.exists():
+        print(f"Error loading {csv_path.name}: file not found.")
+        return
 
-	with csv_path.open(mode="r", encoding="utf-8-sig", newline="") as handle:
-		reader = csv.reader(handle)
-		for _ in range(skip_rows):
-			skipped = next(reader, None)
-			if skipped is None:
-				print(f"Error loading {csv_path.name}: unexpected end of file.")
-				return
+    with csv_path.open(mode="r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.reader(handle)
+        for _ in range(skip_rows):
+            skipped = next(reader, None)
+            if skipped is None:
+                print(f"Error loading {csv_path.name}: unexpected end of file.")
+                return
 
-		headers = next(reader, None)
-		if not headers:
-			print(f"Error loading {csv_path.name}: empty file.")
-			return
+        headers = next(reader, None)
+        if not headers:
+            print(f"Error loading {csv_path.name}: empty file.")
+            return
 
-		columns = _sanitize_columns(headers)
-		columns_sql = ", ".join(f'"{column}" TEXT' for column in columns)
-		cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({columns_sql})')
+        columns = _sanitize_columns(headers)
+        columns_sql = ", ".join(f'"{column}" TEXT' for column in columns)
+        cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({columns_sql})')
 
-		cur.execute(f'SELECT 1 FROM "{table_name}" LIMIT 1')
-		if cur.fetchone():
-			print(f"{table_name} already has data; skipping import.")
-			return
+        cur.execute(f'SELECT 1 FROM "{table_name}" LIMIT 1')
+        if cur.fetchone():
+            print(f"{table_name} already has data; skipping import.")
+            return
 
-		rows = []
-		for row in reader:
-			values = list(row[: len(columns)])
-			if len(values) < len(columns):
-				values.extend([""] * (len(columns) - len(values)))
-			rows.append(values)
+        rows = []
+        for row in reader:
+            values = list(row[: len(columns)])
+            if len(values) < len(columns):
+                values.extend([""] * (len(columns) - len(values)))
+            rows.append(values)
 
-		if not rows:
-			print(f"No rows found in {csv_path.name}.")
-			return
+        if not rows:
+            print(f"No rows found in {csv_path.name}.")
+            return
 
-		placeholders = ", ".join("?" for _ in columns)
-		columns_list = ", ".join(f'"{column}"' for column in columns)
-		cur.executemany(
-			f'INSERT INTO "{table_name}" ({columns_list}) VALUES ({placeholders})',
-			rows,
-		)
-		print(f"Inserted {len(rows)} rows into {table_name}.")
+        placeholders = ", ".join("?" for _ in columns)
+        columns_list = ", ".join(f'"{column}"' for column in columns)
+        cur.executemany(
+            f'INSERT INTO "{table_name}" ({columns_list}) VALUES ({placeholders})',
+            rows,
+        )
+        print(f"Inserted {len(rows)} rows into {table_name}.")
 
 
 def initialize_database() -> None:
@@ -370,7 +405,11 @@ def initialize_database() -> None:
         return
 
     for spec in CSV_SPECS:
-        csv_path = DATA_DIR / spec["filename"]
+        csv_path = _find_data_file(spec)
+        if csv_path is None:
+            searched = ", ".join(_candidate_filenames(spec))
+            print(f"Error loading {spec['filename']}: file not found. Searched: {searched}.")
+            continue
         table_name = spec["table"]
         skip_rows = spec.get("skip_rows", 0)
         try:
