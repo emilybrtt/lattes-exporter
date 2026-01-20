@@ -1,6 +1,7 @@
 import csv
 import re
 import sqlite3
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from typing import Iterable
@@ -8,7 +9,6 @@ from typing import Iterable
 from dotenv import load_dotenv
 
 import pandas as pd
-from pandas.errors import DatabaseError as PandasDatabaseError
 
 from .config import DATA_DIR, sqlite_path
 
@@ -20,18 +20,6 @@ connection: sqlite3.Connection | None = None
 cursor: sqlite3.Cursor | None = None
 
 # Lista qual arquivo CSV deve alimentar qual tabela no SQLite
-def _candidate_filenames(spec: dict) -> list[str]:
-    candidates = []
-    primary = spec.get("filename")
-    if isinstance(primary, str) and primary:
-        candidates.append(primary)
-    for alt in spec.get("alternate_filenames", []):
-        if isinstance(alt, str) and alt:
-            if alt not in candidates:
-                candidates.append(alt)
-    return candidates
-
-
 CSV_SPECS = (
     {
         "filename": "base-de-dados-docente.csv",
@@ -52,10 +40,8 @@ CSV_SPECS = (
         "filename": "alocacao_2026_1_reldetalhe.csv",
         "table": "alocacao_2026_1_reldetalhe",
         "skip_rows": 1,
-        "alternate_filenames": [
-            "Alocacao_2026 1_Rel_Detalhe.csv",
-            "alocacao-2026-1-reldetalhe.csv",
-        ],
+        "strict_columns": False,
+        "merge_strategy": "replace",
         "aliases": [
             "alocacao_detalhe",
             "alocacao_relatorio",
@@ -66,10 +52,8 @@ CSV_SPECS = (
         "filename": "alocacao_26_1.csv",
         "table": "alocacao_26_1",
         "skip_rows": 0,
-        "alternate_filenames": [
-            "alocacao-26-1.csv",
-            "Alocacao-26-1.csv",
-        ],
+        "strict_columns": False,
+        "merge_strategy": "replace",
         "aliases": [
             "alocacao",
             "alocacao_matriz",
@@ -79,6 +63,29 @@ CSV_SPECS = (
 )
 
 ALLOWED_UPLOAD_EXTENSIONS = {".csv", ".xlsx"}
+PHOTO_TABLE = "faculty_photos"
+
+
+def _normalize_resource_name(name: str) -> str:
+    """Normaliza nomes de arquivos para comparação insensível a formato."""
+    return re.sub(r"[^0-9a-zA-Z]+", "", name).lower()
+
+
+def _resolve_dataset_file(spec: dict) -> Path | None:
+    """Localiza o arquivo configurado mesmo que o nome possua variações."""
+    configured = DATA_DIR / spec["filename"]
+    if configured.exists():
+        return configured
+
+    target_key = _normalize_resource_name(spec["filename"])
+    for candidate in DATA_DIR.iterdir():
+        if not candidate.is_file():
+            continue
+        if candidate.suffix.lower() not in ALLOWED_UPLOAD_EXTENSIONS:
+            continue
+        if _normalize_resource_name(candidate.name) == target_key:
+            return candidate
+    return None
 
 def _build_alias_lookup() -> tuple[dict[str, dict], dict[str, dict]]:
     table_map: dict[str, dict] = {}
@@ -87,9 +94,8 @@ def _build_alias_lookup() -> tuple[dict[str, dict], dict[str, dict]]:
         normalized_table = spec["table"].lower()
         table_map[normalized_table] = spec
 
-        for candidate in _candidate_filenames(spec):
-            base_alias = candidate.split(".")[0].replace("-", "_").replace(" ", "_").lower()
-            alias_map.setdefault(base_alias, spec)
+        base_alias = spec["filename"].split(".")[0].replace("-", "_").lower()
+        alias_map[base_alias] = spec
 
         for alias in spec.get("aliases", []):
             if not isinstance(alias, str):
@@ -117,17 +123,9 @@ def _resolve_table_spec(raw_key: str) -> dict:
     return spec
 
 
-def _find_data_file(spec: dict) -> Path | None:
-    for candidate in _candidate_filenames(spec):
-        candidate_path = DATA_DIR / candidate
-        if candidate_path.exists():
-            return candidate_path
-    return None
-
-
 def _load_expected_columns(spec: dict) -> list[str]:
     """Returns the sanitized column names expected for a table, from default CSV if available."""
-    data_path = _find_data_file(spec)
+    data_path = _resolve_dataset_file(spec)
     if data_path is None:
         return []
 
@@ -251,37 +249,31 @@ def reload_table_from_upload(table_key: str, file_bytes: bytes, *, filename: str
             existing_frame = existing_frame.fillna("")
             existing_frame = existing_frame.astype(str)
             existing_columns = list(existing_frame.columns)
-        except (sqlite3.OperationalError, PandasDatabaseError):
+        except sqlite3.OperationalError:
             existing_frame = None
             existing_columns = []
 
     expected_columns = existing_columns or _load_expected_columns(spec)
-    if not expected_columns:
-        reference_file = _find_data_file(spec)
-        base_name = reference_file.name if reference_file is not None else spec.get("filename", "arquivo de referência")
-        raise ValueError(
-            "Não foi possível validar as colunas esperadas para a tabela "
-            + spec["table"]
-            + f". Certifique-se de que {base_name} esteja presente na pasta de dados."
-        )
-
-    uploaded_set = set(columns)
-    expected_set = set(expected_columns)
-    missing = sorted(expected_set - uploaded_set)
-    unexpected = sorted(uploaded_set - expected_set)
-    if missing or unexpected:
-        problems: list[str] = []
-        if missing:
-            problems.append("faltando: " + ", ".join(missing))
-        if unexpected:
-            problems.append("não reconhecidas: " + ", ".join(unexpected))
-        details = "; ".join(problems)
-        raise ValueError(
-            "Colunas inválidas para a tabela "
-            + spec["table"]
-            + (f" ({details})." if details else ".")
-        )
-    ordered_columns = expected_columns
+    if expected_columns:
+        uploaded_set = set(columns)
+        expected_set = set(expected_columns)
+        missing = sorted(expected_set - uploaded_set)
+        unexpected = sorted(uploaded_set - expected_set)
+        if missing or unexpected:
+            problems: list[str] = []
+            if missing:
+                problems.append("faltando: " + ", ".join(missing))
+            if unexpected:
+                problems.append("não reconhecidas: " + ", ".join(unexpected))
+            details = "; ".join(problems)
+            raise ValueError(
+                "Colunas inválidas para a tabela "
+                + spec["table"]
+                + (f" ({details})." if details else ".")
+            )
+        ordered_columns = expected_columns
+    else:
+        ordered_columns = columns
 
     frame = frame.reindex(columns=ordered_columns, fill_value="")
 
@@ -405,10 +397,9 @@ def initialize_database() -> None:
         return
 
     for spec in CSV_SPECS:
-        csv_path = _find_data_file(spec)
+        csv_path = _resolve_dataset_file(spec)
         if csv_path is None:
-            searched = ", ".join(_candidate_filenames(spec))
-            print(f"Error loading {spec['filename']}: file not found. Searched: {searched}.")
+            print(f"Error loading {spec['filename']}: file not found.")
             continue
         table_name = spec["table"]
         skip_rows = spec.get("skip_rows", 0)
@@ -430,3 +421,83 @@ except sqlite3.Error as error:
     print(f"SQLite connection error: {error}")
     connection = None
     cursor = None
+
+
+def _ensure_photo_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {PHOTO_TABLE} (
+            faculty_id TEXT PRIMARY KEY,
+            image BLOB NOT NULL,
+            mime_type TEXT,
+            filename TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+
+
+def store_faculty_photo(
+    faculty_id: str,
+    *,
+    content: bytes,
+    mime_type: str,
+    filename: str,
+) -> dict:
+    if not faculty_id or not faculty_id.strip():
+        raise ValueError("Identificador do docente é obrigatório.")
+    if not content:
+        raise ValueError("Imagem vazia.")
+
+    normalized_id = faculty_id.strip()
+    timestamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        _ensure_photo_table(conn)
+        conn.execute(
+            f"""
+            INSERT INTO {PHOTO_TABLE} (faculty_id, image, mime_type, filename, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(faculty_id) DO UPDATE SET
+                image = excluded.image,
+                mime_type = excluded.mime_type,
+                filename = excluded.filename,
+                updated_at = excluded.updated_at
+            """,
+            (normalized_id, sqlite3.Binary(content), mime_type, filename, timestamp),
+        )
+        conn.commit()
+
+    return {
+        "faculty_id": normalized_id,
+        "mime_type": mime_type,
+        "filename": filename,
+        "updated_at": timestamp,
+    }
+
+
+def fetch_faculty_photo(faculty_id: str) -> dict | None:
+    if not faculty_id or not faculty_id.strip():
+        return None
+
+    normalized_id = faculty_id.strip()
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        try:
+            _ensure_photo_table(conn)
+        except sqlite3.Error:
+            return None
+        row = conn.execute(
+            f"SELECT faculty_id, image, mime_type, filename, updated_at FROM {PHOTO_TABLE} WHERE faculty_id = ?",
+            (normalized_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    return {
+        "faculty_id": row["faculty_id"],
+        "image": row["image"],
+        "mime_type": row["mime_type"],
+        "filename": row["filename"],
+        "updated_at": row["updated_at"],
+    }

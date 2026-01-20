@@ -10,12 +10,15 @@ import time
 import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Collection, Iterable, Sequence, cast
 
 from docx import Document
+from docx.document import Document as DocxDocument
 from docx.shared import Pt, Inches, RGBColor
-import docx.oxml      
+import docx.oxml
+from PIL import Image
 
 from backend.core.config import OUTPUT_DIR, sqlite_path
 
@@ -25,9 +28,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 # Campos de creditação presentes na tabela de alocação agregada.
 ACCREDITATION_COLUMNS = ("AACSB", "EQUIS", "AMBA", "ABET")
 
+PHOTO_TABLE = "faculty_photos"
+
 # Janelas utilizadas para filtrar experiência profissional e produção intelectual.
 EXPERIENCE_WINDOW_YEARS = 12
-PRODUCTION_WINDOW_YEARS = 6
+PRODUCTION_WINDOW_YEARS = 5
 
 _YEAR_PATTERN = re.compile(r"(19|20)\d{2}")
 
@@ -112,6 +117,10 @@ class FacultyProfile:
     personal_site: str | None
     experience_summary: str | None
     international_experience: str | None
+    photo: bytes | None
+    photo_mime_type: str | None
+    photo_filename: str | None
+    photo_updated_at: str | None
     education: list[EducationRecord]
     experiences: list[ExperienceEntry]
     productions: list[ProductionEntry]
@@ -173,6 +182,12 @@ class FacultyProfile:
                 "experience_summary": self.experience_summary,
                 "international_experience": self.international_experience,
             },
+            "photo": {
+                "available": self.photo is not None,
+                "mime_type": self.photo_mime_type,
+                "filename": self.photo_filename,
+                "updated_at": self.photo_updated_at,
+            },
             "education": [asdict(record) for record in self.education],
             "experience": [
                 {
@@ -224,6 +239,32 @@ def _truthy_flag(value: str | None) -> bool:
     return normalized in {"SIM", "YES", "TRUE", "1", "Y"}
 
 
+def _crop_image_to_ratio(image: Image.Image, width_ratio: int, height_ratio: int) -> Image.Image:
+    if width_ratio <= 0 or height_ratio <= 0:
+        return image
+
+    width, height = image.size
+    if width == 0 or height == 0:
+        return image
+
+    target_ratio = width_ratio / height_ratio
+    current_ratio = width / height
+
+    if abs(current_ratio - target_ratio) <= 0.001:
+        return image
+
+    if current_ratio > target_ratio:
+        new_width = int(round(height * target_ratio))
+        offset = max((width - new_width) // 2, 0)
+        cropped = image.crop((offset, 0, offset + new_width, height))
+    else:
+        new_height = int(round(width / target_ratio))
+        offset = max((height - new_height) // 2, 0)
+        cropped = image.crop((0, offset, width, offset + new_height))
+
+    return cropped.copy()
+
+
 class CVAutomation:
     def __init__(self, output_root: Path = OUTPUT_DIR):
         """Configura caminho do banco e da pasta de saída """
@@ -260,11 +301,11 @@ class CVAutomation:
 
                 limited_profile = profile
 
-                docx_path = accreditation_dir / f"{faculty_id}_{_slugify(profile.name)}.docx"
+                docx_target = accreditation_dir / f"{faculty_id}_{_slugify(profile.name)}.docx"
                 json_path = accreditation_dir / f"{faculty_id}_{_slugify(profile.name)}.json"
 
                 try:
-                    self._generate_document(limited_profile, docx_path)
+                    saved_docx_path = self._generate_document(limited_profile, docx_target, include_photo=True)
                     self._write_json(limited_profile, json_path)
                 except Exception as exc:  # noqa: BLE001
                     logger.exception("Failed to render CV for faculty %s: %s", faculty_id, exc)
@@ -275,7 +316,7 @@ class CVAutomation:
                         "faculty_id": faculty_id,
                         "name": profile.name,
                         "accreditation": accreditation_key,
-                        "docx_path": docx_path.relative_to(self.output_root).as_posix(),
+                        "docx_path": saved_docx_path.relative_to(self.output_root).as_posix(),
                         "json_path": json_path.relative_to(self.output_root).as_posix(),
                         "generated_at": timestamp,
                     }
@@ -390,6 +431,13 @@ class CVAutomation:
             except sqlite3.OperationalError:
                 accreditation_rows = []
 
+            try:
+                photo_rows = conn.execute(
+                    f"SELECT faculty_id FROM {PHOTO_TABLE}"
+                ).fetchall()
+            except sqlite3.OperationalError:
+                photo_rows = []
+
         # Constrói mapa de disciplinas para os selos de creditação marcados como "SIM".
         discipline_accreditations: dict[str, set[str]] = {}
         for row in accreditation_rows:
@@ -423,6 +471,12 @@ class CVAutomation:
             if discipline_key and discipline_key in discipline_accreditations:
                 acc_set = cast(set[str], entry["accreditations"])
                 acc_set.update(discipline_accreditations[discipline_key])
+
+        photo_ids = {
+            str(row[0]).strip()
+            for row in photo_rows
+            if row[0] is not None and str(row[0]).strip()
+        }
 
         summaries: list[dict] = []
         for row in base_rows:
@@ -468,6 +522,7 @@ class CVAutomation:
                     "allocation_count": allocation_count,
                     "accreditations": accreditation_values,
                     "has_allocation": has_allocation,
+                    "has_photo": str(faculty_id).strip() in photo_ids,
                 }
             )
 
@@ -478,7 +533,13 @@ class CVAutomation:
         end = min(start + capped_limit, total)
         return summaries[start:end], total
 
-    def export_artifact(self, faculty_id: str, export_format: str) -> dict | None:
+    def export_artifact(
+        self,
+        faculty_id: str,
+        export_format: str,
+        *,
+        include_photo: bool = True,
+    ) -> dict | None:
         """Gera um artefato único no formato solicitado."""
 
         normalized = (export_format or "").strip().lower()
@@ -486,35 +547,35 @@ class CVAutomation:
             raise ValueError("Formato de exportação é obrigatório")
 
         if normalized == "docx":
-            return self._export_docx(faculty_id)
+            return self._export_docx(faculty_id, include_photo=include_photo)
         if normalized == "pdf":
-            return self._export_pdf(faculty_id)
+            return self._export_pdf(faculty_id, include_photo=include_photo)
 
         raise ValueError(f"Formato de exportação não suportado: {export_format}")
 
-    def export_doc(self, faculty_id: str) -> dict | None:
+    def export_doc(self, faculty_id: str, *, include_photo: bool = True) -> dict | None:
         """Compatibilidade retroativa: mantém a exportação em DOCX."""
 
-        return self._export_docx(faculty_id)
+        return self._export_docx(faculty_id, include_photo=include_photo)
 
-    def _export_docx(self, faculty_id: str) -> dict | None:
+    def _export_docx(self, faculty_id: str, *, include_photo: bool = True) -> dict | None:
         profile = self._load_profile(faculty_id)
         if profile is None:
             return None
 
-        docx_path = self.output_root / f"{faculty_id}_{_slugify(profile.name)}.docx"
-        docx_path.parent.mkdir(parents=True, exist_ok=True)
-        self._generate_document(profile, docx_path)
+        docx_target = self.output_root / f"{faculty_id}_{_slugify(profile.name)}.docx"
+        docx_target.parent.mkdir(parents=True, exist_ok=True)
+        saved_docx_path = self._generate_document(profile, docx_target, include_photo=include_photo)
 
         return {
             "faculty_id": faculty_id,
             "name": profile.name,
-            "docx_path": docx_path.relative_to(self.output_root).as_posix(),
+            "docx_path": saved_docx_path.relative_to(self.output_root).as_posix(),
         }
 
-    def _export_pdf(self, faculty_id: str) -> dict | None:
+    def _export_pdf(self, faculty_id: str, *, include_photo: bool = True) -> dict | None:
         # Reutiliza a geração original do DOCX para garantir layout idêntico.
-        docx_metadata = self._export_docx(faculty_id)
+        docx_metadata = self._export_docx(faculty_id, include_photo=include_photo)
         if docx_metadata is None:
             return None
 
@@ -601,6 +662,17 @@ class CVAutomation:
         if faculty_row is None:
             return None
 
+        photo_row = conn.execute(
+            f"SELECT image, mime_type, filename, updated_at FROM {PHOTO_TABLE} WHERE faculty_id = ?",
+            (faculty_row["id"],),
+        ).fetchone()
+
+        photo_blob = photo_row["image"] if photo_row is not None else None
+        photo_bytes = bytes(photo_blob) if photo_blob is not None else None
+        photo_mime = photo_row["mime_type"] if photo_row is not None else None
+        photo_filename = photo_row["filename"] if photo_row is not None else None
+        photo_updated_at = photo_row["updated_at"] if photo_row is not None else None
+
         # Carrega listas auxiliares (experiência, educação, produção).
         reference_point = datetime.utcnow()
         experiences = [
@@ -658,6 +730,10 @@ class CVAutomation:
             personal_site=faculty_row["site_pessoal"],
             experience_summary=faculty_row["exp_prof"],
             international_experience=faculty_row["exp_int"],
+            photo=photo_bytes,
+            photo_mime_type=photo_mime,
+            photo_filename=photo_filename,
+            photo_updated_at=photo_updated_at,
             phd_title=faculty_row["t_dout_en"],
             phd_institution=faculty_row["t_dout_ies"],
             phd_year=faculty_row["t_dout_ano"],
@@ -742,66 +818,108 @@ class CVAutomation:
             )
 
     # ========== Formatação do documento .docx ===========
-    def _format_header(self, document, profile: FacultyProfile):
-        """Monta cabeçalho com informações básicas do docente """
-        name_para = document.add_paragraph(profile.name)
-        name_para.alignment = 1  
-        name_run = name_para.runs[0]
-        name_run.font.name = 'Times New Roman'
-        name_run.font.size = Pt(14)
-        name_run.font.bold = True
-        name_para.paragraph_format.space_after = Pt(3)
-        
-        # Institution
-        inst_para = document.add_paragraph("Insper Instituto de Ensino e Pesquisa")
-        inst_para.alignment = 1  
-        inst_para.runs[0].font.name = 'Times New Roman'
-        inst_para.runs[0].font.size = Pt(12)
-        inst_para.runs[0].font.bold = True
-        inst_para.paragraph_format.space_after = Pt(2)
-        
-        # Position
-        pos_para = document.add_paragraph(profile.career_en or profile.career)
-        pos_para.alignment = 1  
-        pos_para.runs[0].font.name = 'Times New Roman'
-        pos_para.runs[0].font.size = Pt(12)
-        pos_para.runs[0].font.bold = True
-        pos_para.paragraph_format.space_after = Pt(2)
-        
-        # Area
-        area_para = document.add_paragraph(_format_area(profile.area or ""))
-        area_para.alignment = 1  
-        area_para.runs[0].font.name = 'Times New Roman'
-        area_para.runs[0].font.size = Pt(12)
-        area_para.runs[0].font.bold = True
-        area_para.paragraph_format.space_after = Pt(2)
-        
-        # Email
-        email_para = document.add_paragraph(profile.email)
-        email_para.alignment = 1  
-        email_para.runs[0].font.name = 'Times New Roman'
-        email_para.runs[0].font.size = Pt(12)
-        email_para.runs[0].font.bold = True
-        email_para.paragraph_format.space_after = Pt(2)
-        
-        # Admission date
+    def _format_header(self, document, profile: FacultyProfile, *, include_photo: bool = True):
+        """Monta cabeçalho com informações básicas do docente."""
+
+        container = document
+        paragraph_alignment = 1  # Center by default
+
+        if include_photo and profile.photo:
+            table = document.add_table(rows=1, cols=2)
+            table.alignment = 0
+            table.autofit = False
+            table.columns[0].width = Inches(1.25)
+            table.columns[1].width = Inches(5.25)
+
+            for row in table.rows:
+                for cell in row.cells:
+                    cell._element.get_or_add_tcPr().append(
+                        docx.oxml.parse_xml(
+                            r'<w:tcBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                            r'<w:top w:val="none"/>'
+                            r'<w:left w:val="none"/>'
+                            r'<w:bottom w:val="none"/>'
+                            r'<w:right w:val="none"/>'
+                            r'</w:tcBorders>'
+                        )
+                    )
+
+            photo_cell = table.cell(0, 0)
+            text_cell = table.cell(0, 1)
+            paragraph_alignment = 0  # Left align text when photo is present
+            container = text_cell
+
+            text_cell._element.get_or_add_tcPr().append(
+                docx.oxml.parse_xml(
+                    r'<w:tcMar xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                    r'<w:top w:w="40" w:type="dxa"/>'
+                    r'<w:left w:w="40" w:type="dxa"/>'
+                    r'<w:bottom w:w="40" w:type="dxa"/>'
+                    r'<w:right w:w="28" w:type="dxa"/>'
+                    r'</w:tcMar>'
+                )
+            )
+
+            source_stream = BytesIO(profile.photo)
+            source_stream.seek(0)
+            image = Image.open(source_stream)
+            image.load()
+            cropped_image = _crop_image_to_ratio(image, 3, 4)
+            output_stream = BytesIO()
+            image_format = (image.format or "PNG").upper()
+            if image_format not in {"JPEG", "JPG", "PNG"}:
+                image_format = "PNG"
+            if image_format in {"JPEG", "JPG"} and cropped_image.mode in {"RGBA", "LA"}:
+                cropped_image = cropped_image.convert("RGB")
+            cropped_image.save(output_stream, format=image_format)
+            image.close()
+            source_stream.close()
+            output_stream.seek(0)
+
+            photo_paragraph = photo_cell.paragraphs[0] if photo_cell.paragraphs else photo_cell.add_paragraph()
+            for run in list(photo_paragraph.runs):
+                photo_paragraph._element.remove(run._element)
+            run = photo_paragraph.add_run()
+            run.add_picture(output_stream, width=Inches(1.35))
+            photo_paragraph.alignment = 0
+            photo_paragraph.paragraph_format.space_after = Pt(0)
+
+        def add_header_line(text: str | None, *, bold: bool = True, size: int = 12, space_after: int = 2) -> None:
+            if not text:
+                return
+
+            if isinstance(container, DocxDocument):
+                paragraph = container.add_paragraph()
+            else:
+                if container.paragraphs:
+                    paragraph = container.paragraphs[0]
+                    if paragraph.text:
+                        paragraph = container.add_paragraph()
+                    else:
+                        for run in list(paragraph.runs):
+                            paragraph._element.remove(run._element)
+                else:
+                    paragraph = container.add_paragraph()
+
+            run = paragraph.add_run(text)
+            run.font.name = 'Times New Roman'
+            run.font.size = Pt(size)
+            run.font.bold = bold
+            paragraph.alignment = paragraph_alignment
+            paragraph.paragraph_format.space_after = Pt(space_after)
+
+        add_header_line(profile.name, size=14, space_after=3)
+        add_header_line("Insper Instituto de Ensino e Pesquisa")
+        add_header_line(profile.career_en or profile.career)
+        add_header_line(_format_area(profile.area or ""))
+        add_header_line(profile.email)
+
         if profile.admission_date:
             formatted_date = _format_date(profile.admission_date)
-            adm_para = document.add_paragraph(f"Admission: {formatted_date}")
-            adm_para.alignment = 1  
-            adm_para.runs[0].font.name = 'Times New Roman'
-            adm_para.runs[0].font.size = Pt(12)
-            adm_para.runs[0].font.bold = True
-            adm_para.paragraph_format.space_after = Pt(2)
-        
-        # Lattes URL
+            add_header_line(f"Admission: {formatted_date}")
+
         if profile.lattes:
-            lattes_para = document.add_paragraph(profile.lattes)
-            lattes_para.alignment = 1  
-            lattes_para.runs[0].font.name = 'Times New Roman'
-            lattes_para.runs[0].font.size = Pt(12)
-            lattes_para.runs[0].font.bold = False
-            lattes_para.paragraph_format.space_after = Pt(12)
+            add_header_line(profile.lattes, bold=False, space_after=12)
         
         # Academic Unit and Nationality
         dict_units={
@@ -932,7 +1050,9 @@ class CVAutomation:
         self,
         profile: FacultyProfile,
         destination: Path,
-    ) -> None:
+        *,
+        include_photo: bool = True,
+    ) -> Path:
         
         document = Document()  # Cria documento vazio para montar o CV.
         
@@ -941,7 +1061,7 @@ class CVAutomation:
         # section.left_margin = Inches(1.0)
         # section.right_margin = Inches(1.0)
 
-        self._format_header(document, profile)
+        self._format_header(document, profile, include_photo=include_photo)
 
         # ========== EDUCATION ==========
         
@@ -1104,8 +1224,31 @@ class CVAutomation:
         # Metadados do documento
         document.core_properties.author = "CV Automation"
         document.core_properties.subject = f"{profile.name} CV"
-        
-        document.save(destination)
+
+        buffer = BytesIO()
+        document.save(buffer)
+        content = buffer.getvalue()
+        buffer.close()
+
+        destination.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            with destination.open("wb") as handle:
+                handle.write(content)
+            saved_path = destination
+        except PermissionError:
+            timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            fallback = destination.with_name(f"{destination.stem}_{timestamp}{destination.suffix}")
+            with fallback.open("wb") as handle:
+                handle.write(content)
+            logger.warning(
+                "Permission denied writing %s. Saved document to %s instead.",
+                destination,
+                fallback,
+            )
+            saved_path = fallback
+
+        return saved_path
 
     def _convert_docx_to_pdf(self, source: Path, destination: Path) -> None:
         """Converte um DOCX já formatado em PDF reaproveitando o layout existente."""
