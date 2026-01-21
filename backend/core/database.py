@@ -1,6 +1,5 @@
 import csv
 import re
-import sqlite3
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -9,15 +8,20 @@ from typing import Iterable
 from dotenv import load_dotenv
 
 import pandas as pd
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 
-from .config import DATA_DIR, sqlite_path
+from .config import DATA_DIR, database_engine, sqlite_path
 
 load_dotenv() # Carrega variáveis de ambiente
-DB_PATH = sqlite_path()
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-connection: sqlite3.Connection | None = None 
-cursor: sqlite3.Cursor | None = None
+
+def _engine():
+    engine = database_engine()
+    if engine.dialect.name == "sqlite":
+        sqlite_path().parent.mkdir(parents=True, exist_ok=True)
+    return engine
 
 # Lista qual arquivo CSV deve alimentar qual tabela no SQLite
 CSV_SPECS = (
@@ -210,6 +214,26 @@ def _read_csv_flexible(raw_bytes: bytes, skip_rows: int) -> pd.DataFrame:
     )
 
 
+def _quote_identifier(identifier: str) -> str:
+    return f'"{identifier}"'
+
+
+def _insert_rows(conn: Connection, table_name: str, columns: list[str], rows: list[tuple[str, ...]]) -> None:
+    if not rows:
+        return
+    param_names = [f"p{index}" for index in range(len(columns))]
+    placeholders = ", ".join(f":{name}" for name in param_names)
+    columns_sql = ", ".join(_quote_identifier(column) for column in columns)
+    statement = text(
+        f'INSERT INTO {_quote_identifier(table_name)} ({columns_sql}) VALUES ({placeholders})'
+    )
+    payload = [
+        {param_names[index]: row[index] for index in range(len(columns))}
+        for row in rows
+    ]
+    conn.execute(statement, payload)
+
+
 def reload_table_from_upload(table_key: str, file_bytes: bytes, *, filename: str) -> dict:
     """Replaces one of the configured tables with data coming from CSV or XLSX uploads."""
     if not file_bytes:
@@ -240,21 +264,32 @@ def reload_table_from_upload(table_key: str, file_bytes: bytes, *, filename: str
     existing_frame: pd.DataFrame | None = None
     existing_columns: list[str] = []
 
-    with sqlite3.connect(DB_PATH) as conn:
+    table_identifier = spec["table"]
+    merge_strategy = spec.get("merge_strategy", "append").lower()
+    enforce_schema = spec.get("strict_columns", True)
+
+    engine = _engine()
+
+    with engine.connect() as conn:
         try:
             existing_frame = pd.read_sql_query(
-                f'SELECT * FROM "{spec["table"]}"',
+                text(f'SELECT * FROM {_quote_identifier(table_identifier)}'),
                 conn,
             )
-            existing_frame = existing_frame.fillna("")
-            existing_frame = existing_frame.astype(str)
+            if not existing_frame.empty:
+                existing_frame = existing_frame.fillna("").astype(str)
             existing_columns = list(existing_frame.columns)
-        except sqlite3.OperationalError:
+        except SQLAlchemyError:
             existing_frame = None
             existing_columns = []
 
+    if merge_strategy == "replace":
+        existing_frame = None
+        existing_columns = []
+
     expected_columns = existing_columns or _load_expected_columns(spec)
-    if expected_columns:
+
+    if expected_columns and enforce_schema:
         uploaded_set = set(columns)
         expected_set = set(expected_columns)
         missing = sorted(expected_set - uploaded_set)
@@ -295,21 +330,11 @@ def reload_table_from_upload(table_key: str, file_bytes: bytes, *, filename: str
         for row in combined.itertuples(index=False, name=None)
     ]
 
-    with sqlite3.connect(DB_PATH) as conn:
-        cur = conn.cursor()
-        columns_sql = ", ".join(f'"{column}" TEXT' for column in ordered_columns)
-        cur.execute(f'DROP TABLE IF EXISTS "{spec["table"]}"')
-        cur.execute(f'CREATE TABLE "{spec["table"]}" ({columns_sql})')
-
-        if merged_rows:
-            placeholders = ", ".join("?" for _ in ordered_columns)
-            columns_list = ", ".join(f'"{column}"' for column in ordered_columns)
-            cur.executemany(
-                f'INSERT INTO "{spec["table"]}" ({columns_list}) VALUES ({placeholders})',
-                merged_rows,
-            )
-
-        conn.commit()
+    with engine.begin() as conn:
+        columns_sql = ", ".join(f'{_quote_identifier(column)} TEXT' for column in ordered_columns)
+        conn.execute(text(f'DROP TABLE IF EXISTS {_quote_identifier(table_identifier)}'))
+        conn.execute(text(f'CREATE TABLE {_quote_identifier(table_identifier)} ({columns_sql})'))
+        _insert_rows(conn, table_identifier, ordered_columns, merged_rows)
 
     previous_count = len(existing_frame) if existing_frame is not None else 0
     return {
@@ -341,60 +366,62 @@ def _sanitize_columns(headers: list[str]) -> list[str]:
 
 
 def _load_csv_into_table(
-    cur: sqlite3.Cursor, csv_path: Path, table_name: str, skip_rows: int = 0
+    conn: Connection, csv_path: Path, table_name: str, skip_rows: int = 0
 ) -> None:
-    """Lê um CSV e insere seu conteúdo na tabela informada, pulando linhas extras se preciso."""
+    """Lê um CSV/XLSX e insere seu conteúdo na tabela informada, lidando com delimitadores flexíveis."""
     if not csv_path.exists():
         print(f"Error loading {csv_path.name}: file not found.")
         return
 
-    with csv_path.open(mode="r", encoding="utf-8-sig", newline="") as handle:
-        reader = csv.reader(handle)
-        for _ in range(skip_rows):
-            skipped = next(reader, None)
-            if skipped is None:
-                print(f"Error loading {csv_path.name}: unexpected end of file.")
-                return
-
-        headers = next(reader, None)
-        if not headers:
-            print(f"Error loading {csv_path.name}: empty file.")
+    extension = csv_path.suffix.lower()
+    try:
+        if extension == ".csv":
+            frame = _read_csv_flexible(csv_path.read_bytes(), skip_rows)
+        elif extension in {".xlsx", ".xls", ".xlsm"}:
+            frame = pd.read_excel(
+                csv_path,
+                skiprows=skip_rows,
+                dtype=str,
+                engine="openpyxl",
+            )
+        else:
+            print(f"Error loading {csv_path.name}: unsupported file extension {extension}.")
             return
+    except Exception as error:  # noqa: BLE001
+        print(f"Error loading {csv_path.name}: {error}")
+        return
 
-        columns = _sanitize_columns(headers)
-        columns_sql = ", ".join(f'"{column}" TEXT' for column in columns)
-        cur.execute(f'CREATE TABLE IF NOT EXISTS "{table_name}" ({columns_sql})')
+    if frame.empty:
+        print(f"No rows found in {csv_path.name}.")
+        return
 
-        cur.execute(f'SELECT 1 FROM "{table_name}" LIMIT 1')
-        if cur.fetchone():
-            print(f"{table_name} already has data; skipping import.")
-            return
+    columns = _sanitize_columns([str(column) for column in frame.columns])
+    frame.columns = columns
 
-        rows = []
-        for row in reader:
-            values = list(row[: len(columns)])
-            if len(values) < len(columns):
-                values.extend([""] * (len(columns) - len(values)))
-            rows.append(values)
+    columns_sql = ", ".join(f'{_quote_identifier(column)} TEXT' for column in columns)
+    conn.execute(text(f'CREATE TABLE IF NOT EXISTS {_quote_identifier(table_name)} ({columns_sql})'))
 
-        if not rows:
-            print(f"No rows found in {csv_path.name}.")
-            return
+    if conn.execute(text(f'SELECT 1 FROM {_quote_identifier(table_name)} LIMIT 1')).first():
+        print(f"{table_name} already has data; skipping import.")
+        return
 
-        placeholders = ", ".join("?" for _ in columns)
-        columns_list = ", ".join(f'"{column}"' for column in columns)
-        cur.executemany(
-            f'INSERT INTO "{table_name}" ({columns_list}) VALUES ({placeholders})',
-            rows,
-        )
-        print(f"Inserted {len(rows)} rows into {table_name}.")
+    prepared = frame.fillna("")
+    rows = [
+        tuple(str(value) for value in record)
+        for record in prepared.itertuples(index=False, name=None)
+    ]
+
+    if not rows:
+        print(f"No rows found in {csv_path.name}.")
+        return
+
+    _insert_rows(conn, table_name, columns, rows)
+    print(f"Inserted {len(rows)} rows into {table_name}.")
 
 
 def initialize_database() -> None:
     """Carrega todos os CSVs configurados usando uma transação por arquivo"""
-    if connection is None or cursor is None:
-        print("Database connection is not available.")
-        return
+    engine = _engine()
 
     for spec in CSV_SPECS:
         csv_path = _resolve_dataset_file(spec)
@@ -404,36 +431,26 @@ def initialize_database() -> None:
         table_name = spec["table"]
         skip_rows = spec.get("skip_rows", 0)
         try:
-            _load_csv_into_table(cursor, csv_path, table_name, skip_rows=skip_rows)
-            connection.commit()
+            with engine.begin() as conn:
+                _load_csv_into_table(conn, csv_path, table_name, skip_rows=skip_rows)
         except Exception as error:  # noqa: BLE001
-            connection.rollback()
             print(f"Error loading {spec['filename']}: {error}")
 
 
-try:
-    """ Conexão com o banco de dados """
-    connection = sqlite3.connect(DB_PATH)
-    cursor = connection.cursor()
-    print(f"Connected to SQLite database at {DB_PATH}.")
-    initialize_database()
-except sqlite3.Error as error:
-    print(f"SQLite connection error: {error}")
-    connection = None
-    cursor = None
-
-
-def _ensure_photo_table(conn: sqlite3.Connection) -> None:
+def _ensure_photo_table(conn: Connection) -> None:
+    binary_type = "BYTEA" if conn.dialect.name != "sqlite" else "BLOB"
     conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {PHOTO_TABLE} (
-            faculty_id TEXT PRIMARY KEY,
-            image BLOB NOT NULL,
-            mime_type TEXT,
-            filename TEXT,
-            updated_at TEXT
+        text(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_quote_identifier(PHOTO_TABLE)} (
+                faculty_id TEXT PRIMARY KEY,
+                image {binary_type} NOT NULL,
+                mime_type TEXT,
+                filename TEXT,
+                updated_at TEXT
+            )
+            """
         )
-        """
     )
 
 
@@ -452,22 +469,30 @@ def store_faculty_photo(
     normalized_id = faculty_id.strip()
     timestamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute("PRAGMA foreign_keys = ON")
+    engine = _engine()
+
+    with engine.begin() as conn:
         _ensure_photo_table(conn)
         conn.execute(
-            f"""
-            INSERT INTO {PHOTO_TABLE} (faculty_id, image, mime_type, filename, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(faculty_id) DO UPDATE SET
-                image = excluded.image,
-                mime_type = excluded.mime_type,
-                filename = excluded.filename,
-                updated_at = excluded.updated_at
-            """,
-            (normalized_id, sqlite3.Binary(content), mime_type, filename, timestamp),
+            text(
+                f"""
+                INSERT INTO {_quote_identifier(PHOTO_TABLE)} (faculty_id, image, mime_type, filename, updated_at)
+                VALUES (:faculty_id, :image, :mime_type, :filename, :updated_at)
+                ON CONFLICT (faculty_id) DO UPDATE SET
+                    image = EXCLUDED.image,
+                    mime_type = EXCLUDED.mime_type,
+                    filename = EXCLUDED.filename,
+                    updated_at = EXCLUDED.updated_at
+                """
+            ),
+            {
+                "faculty_id": normalized_id,
+                "image": content,
+                "mime_type": mime_type,
+                "filename": filename,
+                "updated_at": timestamp,
+            },
         )
-        conn.commit()
 
     return {
         "faculty_id": normalized_id,
@@ -482,22 +507,35 @@ def fetch_faculty_photo(faculty_id: str) -> dict | None:
         return None
 
     normalized_id = faculty_id.strip()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.row_factory = sqlite3.Row
+    engine = _engine()
+
+    with engine.connect() as conn:
         try:
             _ensure_photo_table(conn)
-        except sqlite3.Error:
+        except SQLAlchemyError:
             return None
         row = conn.execute(
-            f"SELECT faculty_id, image, mime_type, filename, updated_at FROM {PHOTO_TABLE} WHERE faculty_id = ?",
-            (normalized_id,),
-        ).fetchone()
+            text(
+                f"""
+                SELECT faculty_id, image, mime_type, filename, updated_at
+                FROM {_quote_identifier(PHOTO_TABLE)}
+                WHERE faculty_id = :faculty_id
+                """
+            ),
+            {"faculty_id": normalized_id},
+        ).mappings().first()
     if row is None:
         return None
+    image_value = row.get("image")
+    image_bytes = bytes(image_value) if image_value is not None else None
     return {
-        "faculty_id": row["faculty_id"],
-        "image": row["image"],
-        "mime_type": row["mime_type"],
-        "filename": row["filename"],
-        "updated_at": row["updated_at"],
+        "faculty_id": row.get("faculty_id"),
+        "image": image_bytes,
+        "mime_type": row.get("mime_type"),
+        "filename": row.get("filename"),
+        "updated_at": row.get("updated_at"),
     }
+
+
+if __name__ == "__main__":
+	initialize_database()

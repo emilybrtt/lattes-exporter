@@ -198,6 +198,7 @@ def upload_faculty_photo(faculty_id: int):
 
     metadata["faculty_id"] = str(faculty_id)
     metadata["message"] = "Foto atualizada com sucesso."
+    automation_service.invalidate_cache()
     return jsonify(metadata)
 
 
@@ -287,6 +288,7 @@ def upload_table(table_key: str):
         app.logger.exception("Falha ao carregar tabela %s: %s", table_key, exc)
         return jsonify({"error": "Falha interna ao processar o arquivo."}), 500
 
+    automation_service.invalidate_cache()
     response = {
         "message": "Tabela carregada com sucesso.",
         "table": result["table"],

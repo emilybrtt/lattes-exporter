@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import re
-import sqlite3
 import sys
 import time
 import unicodedata
@@ -12,7 +12,9 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Collection, Iterable, Sequence, cast
+from typing import Any, Collection, Iterable, Mapping, Sequence, cast
+from copy import deepcopy
+from threading import Lock
 
 from docx import Document
 from docx.document import Document as DocxDocument
@@ -20,7 +22,11 @@ from docx.shared import Pt, Inches, RGBColor
 import docx.oxml
 from PIL import Image
 
-from backend.core.config import OUTPUT_DIR, sqlite_path
+from sqlalchemy import text
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
+
+from backend.core.config import OUTPUT_DIR, database_engine
 
 logger = logging.getLogger("cv_automation")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -268,9 +274,112 @@ def _crop_image_to_ratio(image: Image.Image, width_ratio: int, height_ratio: int
 class CVAutomation:
     def __init__(self, output_root: Path = OUTPUT_DIR):
         """Configura caminho do banco e da pasta de saída """
-        self.db_path = sqlite_path()
+        self.engine = database_engine()
         self.output_root = output_root
         self.output_root.mkdir(parents=True, exist_ok=True)
+        ttl_env = os.getenv("AUTOMATION_CACHE_TTL")
+        try:
+            ttl_value = int(ttl_env) if ttl_env is not None else 120
+        except ValueError:
+            ttl_value = 120
+        self._cache_ttl = max(ttl_value, 0)
+        self._cache_lock = Lock()
+        self._summary_cache: dict[tuple[Any, ...], tuple[float, list[dict], int]] = {}
+        self._profile_cache: dict[str, tuple[float, dict]] = {}
+        self._all_profiles_cache: tuple[float, list[dict]] | None = None
+
+    @staticmethod
+    def _fetch_all(conn: Connection, sql: str, params: dict | None = None) -> list[dict]:
+        rows = conn.execute(text(sql), params or {}).mappings().all()
+        return [dict(row) for row in rows]
+
+    @staticmethod
+    def _fetch_one(conn: Connection, sql: str, params: dict | None = None) -> dict | None:
+        row = conn.execute(text(sql), params or {}).mappings().first()
+        return dict(row) if row is not None else None
+
+    @staticmethod
+    def _safe_fetch_all(conn: Connection, sql: str, params: dict | None = None) -> list[dict]:
+        try:
+            return CVAutomation._fetch_all(conn, sql, params)
+        except SQLAlchemyError:
+            return []
+
+    def _cache_enabled(self) -> bool:
+        return self._cache_ttl > 0
+
+    def _cache_now(self) -> float:
+        return time.monotonic()
+
+    def _cache_expired(self, timestamp: float) -> bool:
+        return self._cache_ttl > 0 and (self._cache_now() - timestamp) >= self._cache_ttl
+
+    @staticmethod
+    def _cache_clone(value: Any) -> Any:
+        return deepcopy(value)
+
+    def invalidate_cache(self) -> None:
+        with self._cache_lock:
+            self._summary_cache.clear()
+            self._profile_cache.clear()
+            self._all_profiles_cache = None
+
+    def _get_summary_cache(self, key: tuple[Any, ...]) -> tuple[list[dict], int] | None:
+        if not self._cache_enabled():
+            return None
+        with self._cache_lock:
+            entry = self._summary_cache.get(key)
+            if not entry:
+                return None
+            timestamp, data, total = entry
+            if self._cache_expired(timestamp):
+                del self._summary_cache[key]
+                return None
+            return self._cache_clone(data), total
+
+    def _set_summary_cache(self, key: tuple[Any, ...], data: list[dict], total: int) -> None:
+        if not self._cache_enabled():
+            return
+        with self._cache_lock:
+            self._summary_cache[key] = (self._cache_now(), self._cache_clone(data), total)
+
+    def _get_profile_cache(self, faculty_id: str) -> dict | None:
+        if not self._cache_enabled():
+            return None
+        with self._cache_lock:
+            entry = self._profile_cache.get(faculty_id)
+            if not entry:
+                return None
+            timestamp, payload = entry
+            if self._cache_expired(timestamp):
+                del self._profile_cache[faculty_id]
+                return None
+            return self._cache_clone(payload)
+
+    def _set_profile_cache(self, faculty_id: str, payload: dict) -> None:
+        if not self._cache_enabled():
+            return
+        with self._cache_lock:
+            self._profile_cache[faculty_id] = (self._cache_now(), self._cache_clone(payload))
+
+    def _get_all_profiles_cache(self) -> list[dict] | None:
+        if not self._cache_enabled():
+            return None
+        with self._cache_lock:
+            entry = self._all_profiles_cache
+            if entry is None:
+                return None
+            timestamp, payload = entry
+            if self._cache_expired(timestamp):
+                self._all_profiles_cache = None
+                return None
+            return self._cache_clone(payload)
+
+    def _set_all_profiles_cache(self, payload: list[dict]) -> None:
+        if not self._cache_enabled():
+            return
+        with self._cache_lock:
+            self._all_profiles_cache = (self._cache_now(), self._cache_clone(payload))
 
     def run(self, accreditation: str, faculty_ids: Sequence[str] | None = None) -> list[dict]:
         """Cria os arquivos da acreditação pedida """
@@ -285,8 +394,7 @@ class CVAutomation:
         accreditation_dir = self.output_root / accreditation_key.lower()
         accreditation_dir.mkdir(parents=True, exist_ok=True)
 
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.engine.connect() as conn:
             for faculty_id in planned_ids:
                 # Monta os dados completos do docente direto do banco.
                 try:
@@ -334,8 +442,11 @@ class CVAutomation:
 
     def fetch_profile(self, faculty_id: str) -> dict | None:
         """Busca um docente pelo id e devolve os dados prontos para JSON """
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        cached = self._get_profile_cache(faculty_id)
+        if cached is not None:
+            return cached
+
+        with self.engine.connect() as conn:
             try:
                 # Reaproveita a lógica interna para compor o perfil.
                 profile = self._build_profile(conn, faculty_id)
@@ -350,17 +461,22 @@ class CVAutomation:
         if profile is None:
             return None
 
-        return profile.to_serializable()
+        serialized = profile.to_serializable()
+        self._set_profile_cache(faculty_id, serialized)
+        return serialized
 
     def fetch_all_profiles(self) -> list[dict]:
         """Devolve todos os docentes com os dados já formatados """
+        cached = self._get_all_profiles_cache()
+        if cached is not None:
+            return cached
+
         faculty_ids = self._fetch_all_ids()
         if not faculty_ids:
             return []
 
         results: list[dict] = []
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.engine.connect() as conn:
             for faculty_id in faculty_ids:
                 # Continua mesmo se um docente gerar erro
                 try:
@@ -379,6 +495,7 @@ class CVAutomation:
 
                 results.append(profile.to_serializable())
 
+            self._set_all_profiles_cache(results)
         return results
 
     def fetch_profiles_summary(
@@ -400,55 +517,61 @@ class CVAutomation:
             for item in (accreditations or [])
             if isinstance(item, str) and item.strip()
         }
+        cache_key = (
+            safe_offset,
+            capped_limit,
+            bool(allocated_only),
+            tuple(sorted(accreditation_filter)),
+        )
 
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        cached = self._get_summary_cache(cache_key)
+        if cached is not None:
+            return cached
 
-            base_rows = conn.execute(
+        with self.engine.connect() as conn:
+            base_rows = self._fetch_all(
+                conn,
                 """
                 SELECT id, nome_padrao, area, nova_area, unid_acad
                 FROM base_de_dados_docente
+                """,
+            )
+
+            detail_rows = self._safe_fetch_all(
+                conn,
                 """
-            ).fetchall()
+                SELECT nome_completo, disciplina
+                FROM alocacao_2026_1_reldetalhe
+                """,
+            )
 
-            try:
-                detail_rows = conn.execute(
-                    """
-                    SELECT nome_completo, disciplina
-                    FROM alocacao_2026_1_reldetalhe
-                    """
-                ).fetchall()
-            except sqlite3.OperationalError:
-                detail_rows = []
+            accreditation_rows = self._safe_fetch_all(
+                conn,
+                """
+                SELECT disciplina, aacsb, equis, amba, abet
+                FROM alocacao_26_1
+                """,
+            )
 
-            try:
-                accreditation_rows = conn.execute(
-                    """
-                    SELECT DISCIPLINA, AACSB, EQUIS, AMBA, ABET
-                    FROM alocacao_26_1
-                    """
-                ).fetchall()
-            except sqlite3.OperationalError:
-                accreditation_rows = []
+            photo_rows = self._safe_fetch_all(
+                conn,
+                f"SELECT faculty_id FROM {PHOTO_TABLE}",
+            )
 
-            try:
-                photo_rows = conn.execute(
-                    f"SELECT faculty_id FROM {PHOTO_TABLE}"
-                ).fetchall()
-            except sqlite3.OperationalError:
-                photo_rows = []
+        allocation_data_available = bool(detail_rows)
+        accreditation_data_available = bool(accreditation_rows)
 
         # Constrói mapa de disciplinas para os selos de creditação marcados como "SIM".
         discipline_accreditations: dict[str, set[str]] = {}
         for row in accreditation_rows:
-            discipline_key = _normalize_token(row["DISCIPLINA"])
+            discipline_key = _normalize_token(_row_value(row, "DISCIPLINA", "disciplina"))
             if not discipline_key:
                 continue
 
             flags = {
                 column
                 for column in ACCREDITATION_COLUMNS
-                if _truthy_flag(row[column])
+                if _truthy_flag(_row_value(row, column))
             }
             if not flags:
                 continue
@@ -457,7 +580,7 @@ class CVAutomation:
         # Indexa docentes alocados com contagem e creditações derivadas das disciplinas.
         allocation_index: dict[str, dict[str, Any]] = {}
         for row in detail_rows:
-            name_key = _normalize_token(row["nome_completo"])
+            name_key = _normalize_token(_row_value(row, "nome_completo", "NOME_COMPLETO"))
             if not name_key:
                 continue
 
@@ -467,21 +590,22 @@ class CVAutomation:
             )
             entry["count"] = int(entry["count"]) + 1
 
-            discipline_key = _normalize_token(row["disciplina"])
+            discipline_key = _normalize_token(_row_value(row, "disciplina", "DISCIPLINA"))
             if discipline_key and discipline_key in discipline_accreditations:
                 acc_set = cast(set[str], entry["accreditations"])
                 acc_set.update(discipline_accreditations[discipline_key])
 
         photo_ids = {
-            str(row[0]).strip()
+            str(_row_value(row, "faculty_id", "FACULTY_ID", "id", "ID")).strip()
             for row in photo_rows
-            if row[0] is not None and str(row[0]).strip()
+            if _row_value(row, "faculty_id", "FACULTY_ID", "id", "ID") is not None
+            and str(_row_value(row, "faculty_id", "FACULTY_ID", "id", "ID")).strip()
         }
 
         summaries: list[dict] = []
         for row in base_rows:
-            faculty_id = row["id"]
-            name_raw = (row["nome_padrao"] or "").strip()
+            faculty_id = _row_value(row, "id", "ID")
+            name_raw = (str(_row_value(row, "nome_padrao", "NOME_PADRAO")) or "").strip()
             if not faculty_id or not name_raw:
                 continue
 
@@ -496,22 +620,22 @@ class CVAutomation:
             accreditation_set = set(accreditation_values)
             has_allocation = allocation_count > 0
 
-            if allocated_only and not has_allocation:
+            if allocation_data_available and allocated_only and not has_allocation:
                 continue
 
             if accreditation_filter and not accreditation_set.intersection(accreditation_filter):
                 continue
 
-            if not accreditation_values:
+            if accreditation_data_available and not accreditation_values:
                 continue
 
-            area_code = (row["area"] or "").strip()
+            area_code = (str(_row_value(row, "area", "AREA")) or "").strip()
             area_label = _format_area(area_code) if area_code else None
-            area_value_raw = row["nova_area"] or area_label
+            area_value_raw = _row_value(row, "nova_area", "NOVA_AREA") or area_label
             if isinstance(area_value_raw, str):
                 area_value_raw = area_value_raw.strip()
             area_value = area_value_raw or None
-            unit_value = (row["unid_acad"] or "").strip() or None
+            unit_value = (str(_row_value(row, "unid_acad", "UNID_ACAD")) or "").strip() or None
 
             summaries.append(
                 {
@@ -531,7 +655,9 @@ class CVAutomation:
 
         start = min(safe_offset, total)
         end = min(start + capped_limit, total)
-        return summaries[start:end], total
+        page_slice = summaries[start:end]
+        self._set_summary_cache(cache_key, page_slice, total)
+        return page_slice, total
 
     def export_artifact(
         self,
@@ -599,18 +725,18 @@ class CVAutomation:
         }
 
     def _fetch_all_ids(self) -> list[str]:
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.execute("SELECT id FROM base_de_dados_docente")
-            return [str(row[0]) for row in cursor.fetchall()]
+        with self.engine.connect() as conn:
+            ids = conn.execute(text("SELECT id FROM base_de_dados_docente")).scalars().all()
+            return [str(identifier) for identifier in ids]
 
     def _load_profile(self, faculty_id: str) -> FacultyProfile | None:
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with self.engine.connect() as conn:
             return self._build_profile(conn, faculty_id)
 
-    def _build_profile(self, conn: sqlite3.Connection, faculty_id: str) -> FacultyProfile | None:
+    def _build_profile(self, conn: Connection, faculty_id: str) -> FacultyProfile | None:
         """Lê todas as colunas necessárias para gerar um perfil completo """
-        faculty_row = conn.execute(
+        faculty_row = self._fetch_one(
+            conn,
             """
             SELECT
                 id,
@@ -654,18 +780,19 @@ class CVAutomation:
                 linkedin,
                 site_pessoal
             FROM base_de_dados_docente
-            WHERE id = ?
+            WHERE id = :faculty_id
             """,
-            (faculty_id,),
-        ).fetchone()
+            {"faculty_id": faculty_id},
+        )
 
         if faculty_row is None:
             return None
 
-        photo_row = conn.execute(
-            f"SELECT image, mime_type, filename, updated_at FROM {PHOTO_TABLE} WHERE faculty_id = ?",
-            (faculty_row["id"],),
-        ).fetchone()
+        photo_row = self._fetch_one(
+            conn,
+            f"SELECT image, mime_type, filename, updated_at FROM {PHOTO_TABLE} WHERE faculty_id = :faculty_id",
+            {"faculty_id": faculty_row["id"]},
+        )
 
         photo_blob = photo_row["image"] if photo_row is not None else None
         photo_bytes = bytes(photo_blob) if photo_blob is not None else None
@@ -683,7 +810,7 @@ class CVAutomation:
         education = _build_education_records(faculty_row)
         try:
             raw_productions = list(self._load_production(conn, faculty_row["nome_padrao"]))
-        except sqlite3.Error as exc:
+        except SQLAlchemyError as exc:
             logger.warning(
                 "Skipping production data for %s due to database error: %s",
                 faculty_row["nome_padrao"],
@@ -747,74 +874,80 @@ class CVAutomation:
             productions=productions,
         )
 
-    def _load_experience(self, conn: sqlite3.Connection, faculty_id: str) -> Iterable[ExperienceEntry]:
+    def _load_experience(self, conn: Connection, faculty_id: str) -> Iterable[ExperienceEntry]:
         """Filtra experiências do docente que estejam em inglês """
-        cursor = conn.execute(
-            """
-            SELECT
-                cargo_role,
-                empresa_company,
-                cidade_city,
-                pa_s_country,
-                categoria_prof_res_tch,
-                in_cio,
-                fim,
-                idioma
-            FROM docentes_experiencia_profissional
-            WHERE id = ?
-            ORDER BY in_cio DESC
-            """,
-            (faculty_id,),
-        )
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    cargo_role,
+                    empresa_company,
+                    cidade_city,
+                    pa_s_country,
+                    categoria_prof_res_tch,
+                    in_cio,
+                    fim,
+                    idioma
+                FROM docentes_experiencia_profissional
+                WHERE id = :faculty_id
+                ORDER BY in_cio DESC
+                """
+            ),
+            {"faculty_id": faculty_id},
+        ).mappings()
 
-        for row in cursor.fetchall():
-            language = (row["idioma"] or "").strip().upper()
+        for row_mapping in rows:
+            row = dict(row_mapping)
+            language = (row.get("idioma") or "").strip().upper()
             if language and language != "EN":
                 continue
             yield ExperienceEntry(
-                role=row["cargo_role"],
-                organization=row["empresa_company"],
-                city=row["cidade_city"],
-                country=row["pa_s_country"],
-                category=row["categoria_prof_res_tch"],
-                start=_parse_date(row["in_cio"]),
-                end=_parse_date(row["fim"]),
+                role=row.get("cargo_role"),
+                organization=row.get("empresa_company"),
+                city=row.get("cidade_city"),
+                country=row.get("pa_s_country"),
+                category=row.get("categoria_prof_res_tch"),
+                start=_parse_date(row.get("in_cio")),
+                end=_parse_date(row.get("fim")),
             )
 
-    def _load_production(self, conn: sqlite3.Connection, faculty_name: str) -> Iterable[ProductionEntry]:
+    def _load_production(self, conn: Connection, faculty_name: str) -> Iterable[ProductionEntry]:
         """Busca produções acadêmicas ordenadas por ano """
-        cursor = conn.execute(
-            """
-            SELECT
-                ano,
-                t_tulo,
-                tipo,
-                ve_culo_ou_natureza,
-                classifica_o,
-                revis_o,
-                status_savi,
-                status_biblioteca,
-                fonte_da_evid_ncia,
-                informa_o_cv_lattes
-            FROM docentes_producao
-            WHERE professor = ?
-            ORDER BY ano DESC, t_tulo
-            """,
-            (faculty_name,),
-        )
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    ano,
+                    t_tulo,
+                    tipo,
+                    ve_culo_ou_natureza,
+                    classifica_o,
+                    revis_o,
+                    status_savi,
+                    status_biblioteca,
+                    fonte_da_evid_ncia,
+                    informa_o_cv_lattes
+                FROM docentes_producao
+                WHERE professor = :faculty_name
+                ORDER BY ano DESC, t_tulo
+                """
+            ),
+            {"faculty_name": faculty_name},
+        ).mappings()
 
-        for row in cursor.fetchall():
+        for row_mapping in rows:
+            row = dict(row_mapping)
             yield ProductionEntry(
-                year=row["ano"],
-                title=row["t_tulo"],
-                production_type=row["tipo"],
-                nature=row["ve_culo_ou_natureza"],
-                classification=row["classifica_o"],
-                peer_review=row["revis_o"],
-                status_savi=row["status_savi"],
-                status_biblioteca=row["status_biblioteca"],
-                evidence_source=row["fonte_da_evid_ncia"],
-                lattes_info=row["informa_o_cv_lattes"],
+                year=row.get("ano"),
+                title=row.get("t_tulo"),
+                production_type=row.get("tipo"),
+                nature=row.get("ve_culo_ou_natureza"),
+                classification=row.get("classifica_o"),
+                peer_review=row.get("revis_o"),
+                status_savi=row.get("status_savi"),
+                status_biblioteca=row.get("status_biblioteca"),
+                evidence_source=row.get("fonte_da_evid_ncia"),
+                lattes_info=row.get("informa_o_cv_lattes"),
             )
 
     # ========== Formatação do documento .docx ===========
@@ -1338,7 +1471,24 @@ def _append_table_rows(table, rows: list[tuple[str, str | None]]) -> None:
         row.cells[1].text = str(value).strip() if value and str(value).strip() else ""
 
 
-def _build_education_records(row: sqlite3.Row) -> list[EducationRecord]:
+def _row_value(row: Mapping[str, Any], *keys: str) -> Any:
+    """Obtém valores de dicionários oriundos do banco lidando com colunas renomeadas."""
+    for key in keys:
+        if key in row:
+            return row[key]
+    normalized_candidates = []
+    for key in keys:
+        lower = key.lower()
+        normalized_candidates.append(lower)
+        normalized_candidates.append(lower.replace(" ", "_"))
+        normalized_candidates.append(lower.replace(" ", "_").replace("-", "_"))
+    for candidate in normalized_candidates:
+        if candidate in row:
+            return row[candidate]
+    return None
+
+
+def _build_education_records(row: Mapping[str, Any]) -> list[EducationRecord]:
     """Monta lista com as titulações mais relevantes do docente """
     education: list[EducationRecord] = []
     if row["t_dout_en"]:
