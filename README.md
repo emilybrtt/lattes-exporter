@@ -14,16 +14,20 @@ Pipeline completo para gerar pacotes de currículo (DOCX + JSON) a partir dos da
 ## Arquitetura
 
 ### Backend (Python 3.11)
+- [backend/core/config.py](backend/core/config.py):
+  - Centraliza caminhos de dados/exports e criação do engine SQLAlchemy.
+  - Aceita `.env` com `DATABASE_URL`/`SERVICE_URI` (Postgres ou SQLite) e `LATTES_SQLITE_PATH`.
 - [backend/core/database.py](backend/core/database.py):
   - Mapeia arquivos suportados via `CSV_SPECS`, incluindo tabelas de alocação.
-  - Disponibiliza `reload_table_from_upload`, que aceita CSV ou XLSX (delimitadores automáticos) e recria a tabela SQLite.
+  - Disponibiliza `reload_table_from_upload`, que aceita CSV ou XLSX (delimitadores automáticos) e recria a tabela conforme o banco ativo.
 - [backend/services/automation.py](backend/services/automation.py):
   - Consolida dados dos docentes (dados básicos, experiências, produções e creditações).
-  - Gera documentos DOCX a partir de templates (python-docx) e registra metadados dos artefatos.
+  - Gera documentos DOCX a partir de templates (python-docx), persiste fotos opcionais e registra metadados dos artefatos.
 - [app.py](app.py): endpoints principais:
-  - `GET /summary` – lista paginada de docentes (com filtros por acreditação e flag de alocação).
-  - `GET /<id>` – perfil completo de um docente.
-  - `POST /export` – gera docx/pdf e retorna metadados com URLs de download.
+  - `GET /summary` – lista paginada de docentes (`page`, `per_page`, `allocated_only`, `accreditation[]`).
+  - `GET /<id>` – perfil completo de um docente (com URL da foto quando existir).
+  - `POST /export` – gera DOCX/PDF (`format`, `include_photo`) e retorna metadados com URLs de download.
+  - `POST /faculty/<id>/photo` / `GET /faculty/<id>/photo` – upload e download seguros das fotos dos docentes (PNG/JPEG/WebP).
   - `POST /tables/<table_key>/upload` – upload manual de planilhas (`file` em multipart) para qualquer tabela cadastrada.
   - `GET /artifacts/<path>` – download seguro do artefato gerado.
   - `POST /automation/run` / `GET /automation/status` – execução em lote por acreditação.
@@ -68,6 +72,18 @@ Qualquer upload manual aceita CSV com delimitador `,`, `;`, `\t`, `|` ou XLSX (`
    ```
    O backend fica em `http://localhost:5000`.
 
+  Opcional: crie um arquivo `.env` na raiz para configurar banco e cache. Exemplos:
+
+  ```dotenv
+  DATABASE_URL=postgresql+psycopg://user:pass@host:5432/dbname
+  LATTES_SQLITE_PATH=C:/dados/lattes.sqlite3
+  AUTOMATION_CACHE_TTL=300
+  ```
+
+  - `DATABASE_URL` ou `SERVICE_URI` ativam Postgres (ou outro banco suportado pelo SQLAlchemy).
+  - O fallback é SQLite em `data/lattes.sqlite3`; use `LATTES_SQLITE_PATH` para apontar outro arquivo.
+  - `AUTOMATION_CACHE_TTL` controla (em segundos) o cache de `/summary` e perfis; defina `0` para desligar.
+
 ### Frontend
 1. Instale dependências
    ```bash
@@ -87,7 +103,8 @@ Variável opcional: defina `VITE_API_BASE_URL` para apontar para outro backend.
 ## Fluxos Principais
 1. **Atualizar dados via UI**: abra `/datasets/upload`, envie novos CSV/XLSX para cada tabela, verifique contagem/colunas retornadas.
 2. **Navegar no painel**: em `/app` utilize busca e filtros para localizar docentes. Use “Selecionar todos” e exporte em DOCX ou PDF.
-3. **Downloads**: após exportar, links ficam disponíveis tanto no modal quanto via `/artifacts/<path>`.
+3. **Gerenciar fotos**: envie imagens via `POST /faculty/<id>/photo` (PNG/JPEG/WebP até 5 MB); visualize em `/faculty/<id>/photo` ou diretamente no painel.
+4. **Downloads**: após exportar, links ficam disponíveis tanto no modal quanto via `/artifacts/<path>`.
 
 CLI (automatização):
 - `python -m backend.services.automation --accreditation AACSB`
@@ -108,6 +125,7 @@ CLI (automatização):
 - **Nenhum docente exibido**: confirme `/summary` no backend e se as planilhas de alocação foram atualizadas (nomes devem coincidir).
 - **Erro no upload**: resposta contém `error`. Verifique se o arquivo está no formato CSV/XLSX e se o cabeçalho não está vazio.
 - **Artefato não abre**: confirme que `backend/exports/output/<accreditation>/` contém o arquivo e que `/artifacts/…` retorna 200.
+- **Falha de conexão com o banco**: revise `DATABASE_URL`/`SERVICE_URI` no `.env` e confirme que a URL segue o padrão `postgresql+psycopg://` (ou remova para voltar ao SQLite padrão).
 
 ---
 
