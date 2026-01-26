@@ -164,6 +164,7 @@ def export_faculty(faculty_id: int | None = None):
 
 @app.post("/faculty/<int:faculty_id>/photo")
 def upload_faculty_photo(faculty_id: int):
+    """Recebe a imagem do docente, valida limites e delega o armazenamento."""
     file_storage = request.files.get("photo")
     if file_storage is None or not file_storage.filename:
         return jsonify({"error": "Envie uma imagem no campo 'photo'."}), 400
@@ -204,6 +205,7 @@ def upload_faculty_photo(faculty_id: int):
 
 @app.get("/faculty/<int:faculty_id>/photo")
 def download_faculty_photo(faculty_id: int):
+    """Retorna a foto binária do docente preservando tipo MIME e nome sugerido."""
     record = fetch_faculty_photo(str(faculty_id))
     if record is None:
         return jsonify({"error": "Foto não encontrada."}), 404
@@ -222,6 +224,7 @@ def download_faculty_photo(faculty_id: int):
 
 @app.get("/artifacts/<path:resource>")
 def download_artifact(resource: str):
+    """Realiza download seguro de artefatos gerados pela automação."""
     base_dir = automation_service.output_root.resolve()
     target_path = (base_dir / resource).resolve()
 
@@ -238,6 +241,7 @@ def download_artifact(resource: str):
 
 @app.get("/automation/status")
 def automation_status():
+    """Lista pastas já exportadas para facilitar monitoramento de execuções."""
     try:
         output_dirs = sorted(
             entry.name for entry in automation_service.output_root.iterdir() if entry.is_dir()
@@ -254,6 +258,7 @@ def automation_status():
 
 @app.post("/automation/run")
 def automation_run():
+    """Dispara a geração em lote recebendo acreditação e IDs opcionais."""
     payload = request.get_json(force=True, silent=True) or {}
     accreditation = payload.get("accreditation")
     faculty_ids = payload.get("faculty_ids")

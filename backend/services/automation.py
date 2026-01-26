@@ -246,6 +246,7 @@ def _truthy_flag(value: str | None) -> bool:
 
 
 def _crop_image_to_ratio(image: Image.Image, width_ratio: int, height_ratio: int) -> Image.Image:
+    """Faz corte centralizado para adequar a foto ao aspecto exigido pelo template."""
     if width_ratio <= 0 or height_ratio <= 0:
         return image
 
@@ -300,31 +301,38 @@ class CVAutomation:
 
     @staticmethod
     def _safe_fetch_all(conn: Connection, sql: str, params: dict | None = None) -> list[dict]:
+        """Executa consultas opcionalmente falhando em silêncio para consultas auxiliares."""
         try:
             return CVAutomation._fetch_all(conn, sql, params)
         except SQLAlchemyError:
             return []
 
     def _cache_enabled(self) -> bool:
+        """Indica se o cache em memória está habilitado de acordo com o TTL."""
         return self._cache_ttl > 0
 
     def _cache_now(self) -> float:
+        """Retorna um carimbo monotônico usado para validar expiração de cache."""
         return time.monotonic()
 
     def _cache_expired(self, timestamp: float) -> bool:
+        """Determina se um item armazenado já excedeu o TTL configurado."""
         return self._cache_ttl > 0 and (self._cache_now() - timestamp) >= self._cache_ttl
 
     @staticmethod
     def _cache_clone(value: Any) -> Any:
+        """Copia profunda do valor em cache para evitar mutações externas."""
         return deepcopy(value)
 
     def invalidate_cache(self) -> None:
+        """Limpa todas as estruturas de cache para refletir dados atualizados."""
         with self._cache_lock:
             self._summary_cache.clear()
             self._profile_cache.clear()
             self._all_profiles_cache = None
 
     def _get_summary_cache(self, key: tuple[Any, ...]) -> tuple[list[dict], int] | None:
+        """Recupera uma página de resumos do cache quando ainda válida."""
         if not self._cache_enabled():
             return None
         with self._cache_lock:
@@ -338,12 +346,14 @@ class CVAutomation:
             return self._cache_clone(data), total
 
     def _set_summary_cache(self, key: tuple[Any, ...], data: list[dict], total: int) -> None:
+        """Armazena uma lista de resumos e o total associado para reaproveitamento."""
         if not self._cache_enabled():
             return
         with self._cache_lock:
             self._summary_cache[key] = (self._cache_now(), self._cache_clone(data), total)
 
     def _get_profile_cache(self, faculty_id: str) -> dict | None:
+        """Busca um perfil serializado no cache em memória conforme o TTL."""
         if not self._cache_enabled():
             return None
         with self._cache_lock:
@@ -357,12 +367,14 @@ class CVAutomation:
             return self._cache_clone(payload)
 
     def _set_profile_cache(self, faculty_id: str, payload: dict) -> None:
+        """Guarda o perfil serializado de um docente específico."""
         if not self._cache_enabled():
             return
         with self._cache_lock:
             self._profile_cache[faculty_id] = (self._cache_now(), self._cache_clone(payload))
 
     def _get_all_profiles_cache(self) -> list[dict] | None:
+        """Retorna a lista completa de perfis já formatados caso esteja em cache."""
         if not self._cache_enabled():
             return None
         with self._cache_lock:
@@ -376,6 +388,7 @@ class CVAutomation:
             return self._cache_clone(payload)
 
     def _set_all_profiles_cache(self, payload: list[dict]) -> None:
+        """Persiste o cache com todos os perfis para acelerar listagens completas."""
         if not self._cache_enabled():
             return
         with self._cache_lock:
@@ -1457,6 +1470,7 @@ class CVAutomation:
         raise ValueError(f"Falha ao converter DOCX em PDF: {last_error}") from last_error
 
     def _write_json(self, profile: FacultyProfile, destination: Path) -> None:
+        """Serializa o perfil completo em JSON para facilitar integrações externas."""
         destination.write_text(json.dumps(profile.to_serializable(), indent=2), encoding="utf-8")
 
 
@@ -1574,28 +1588,30 @@ def _slugify(text: str) -> str:
         slug = slug.replace("--", "-")
     return slug or "faculty"
 
-dict_areas={
-'FIN': "Finance",
-'MGT': "Management",
-'QTM': "Quantitative Methods",
-'NSA': "No Specific Area",
-'LEG': "Legal Studies",
-'ECO': "Economics",
-'MKT': "Marketing",
-'ACC': "Accounting",
-'ITO': "IT and Operations",
+
+# Mapeia códigos históricos de área para os rótulos exibidos no resumo.
+dict_areas = {
+    "FIN": "Finance",
+    "MGT": "Management",
+    "QTM": "Quantitative Methods",
+    "NSA": "No Specific Area",
+    "LEG": "Legal Studies",
+    "ECO": "Economics",
+    "MKT": "Marketing",
+    "ACC": "Accounting",
+    "ITO": "IT and Operations",
 }
 
 def _format_area(text: str) -> str:
     """Traduz códigos de área para descrições amigáveis """
     safe = ""
     for c in text.strip():
-        c.upper()
-        safe+=c
+        safe += c.upper()
     return dict_areas.get(safe, text)
 
 
 def main() -> None:
+    """Ponto de entrada para execução via CLI, espelhando o script original."""
     parser = argparse.ArgumentParser(description="Generate summarized accreditation CVs")
     parser.add_argument("--accreditation", required=True)
     parser.add_argument("--faculty", nargs="*", help="Optional list of faculty IDs to process")

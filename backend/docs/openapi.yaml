@@ -1,0 +1,544 @@
+openapi: 3.1.0
+info:
+  title: Lattes Exporter API
+  version: 1.0.0
+  summary: REST interface for managing faculty datasets and generating accreditation artifacts.
+  description: |
+    The Lattes Exporter backend ingests flat files generated from the Lattes platform,
+    consolidates faculty data, and produces curriculum artifacts (DOCX, PDF, JSON).
+    This specification describes the public HTTP endpoints exposed by the Flask service.
+servers:
+  - url: http://localhost:5000
+paths:
+  /:
+    get:
+      summary: List full faculty profiles
+      description: Returns every faculty member with the fully consolidated JSON payload used for automation.
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total:
+                    type: integer
+                    minimum: 0
+                  result:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FacultyProfile'
+  /summary:
+    get:
+      summary: List faculty summaries
+      description: Provides paginated slices of faculty records, including allocation and accreditation metadata.
+      parameters:
+        - in: query
+          name: page
+          schema:
+            type: integer
+            minimum: 1
+          description: Page number (1-based). Defaults to 1.
+        - in: query
+          name: per_page
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+          description: Items per page. Defaults to 50.
+        - in: query
+          name: allocated_only
+          schema:
+            type: string
+            enum: ['0', '1', 'true', 'false']
+          description: Set to 0/false to include faculty without allocations. Defaults to true.
+        - in: query
+          name: accreditation
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          description: Optional accreditation filters (AACSB, EQUIS, AMBA, ABET).
+      responses:
+        '200':
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FacultySummaryPage'
+        '400':
+          description: Invalid pagination parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  '/{facultyId}':
+    get:
+      summary: Fetch full faculty profile
+      parameters:
+        - in: path
+          name: facultyId
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Faculty record found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FacultyProfile'
+        '404':
+          description: Faculty not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /export:
+    post:
+      summary: Generate artifact for faculty
+      description: Produces a DOCX or PDF artifact for the requested faculty member.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportRequest'
+      parameters:
+        - in: query
+          name: format
+          schema:
+            type: string
+            enum: [docx, pdf]
+          description: Target format (overrides body value).
+        - in: query
+          name: include_photo
+          schema:
+            type: string
+          description: When set to 0/false, skips embedding photos in the generated document.
+      responses:
+        '200':
+          description: Artifact generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactResponse'
+        '400':
+          description: Invalid faculty id or format
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Faculty not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  '/export/{facultyId}':
+    post:
+      summary: Generate artifact for faculty (path parameter)
+      parameters:
+        - in: path
+          name: facultyId
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ExportRequest'
+      responses:
+        '200':
+          description: Artifact generated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactResponse'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Faculty not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  '/faculty/{facultyId}/photo':
+    post:
+      summary: Upload faculty photo
+      parameters:
+        - in: path
+          name: facultyId
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                photo:
+                  type: string
+                  format: binary
+                  description: PNG, JPEG, or WebP image up to 5 MB.
+              required:
+                - photo
+      responses:
+        '200':
+          description: Photo stored successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PhotoResponse'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Faculty not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      summary: Download faculty photo
+      parameters:
+        - in: path
+          name: facultyId
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Binary image
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Photo not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  '/tables/{tableKey}/upload':
+    post:
+      summary: Upload dataset for ingestion
+      description: Replaces one of the configured tables using CSV or XLSX files.
+      parameters:
+        - in: path
+          name: tableKey
+          required: true
+          schema:
+            type: string
+          description: Table identifier or alias defined in CSV_SPECS.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: CSV or XLSX payload matching the expected header.
+              required:
+                - file
+      responses:
+        '200':
+          description: Table replaced successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TableUploadResponse'
+        '400':
+          description: Invalid file or schema mismatch
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /automation/run:
+    post:
+      summary: Execute batch automation
+      description: Generates artifacts for every faculty member inside the provided accreditation cohort.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - accreditation
+              properties:
+                accreditation:
+                  type: string
+                  description: Accreditation tag (AACSB, EQUIS, AMBA, ABET, etc.).
+                faculty_ids:
+                  type: array
+                  items:
+                    type: string
+                  description: Optional list of faculty ids to limit processing.
+      responses:
+        '200':
+          description: Automation completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  generated:
+                    type: integer
+                    minimum: 0
+                  artifacts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ArtifactResponse'
+        '400':
+          description: Invalid accreditation or faculty list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /automation/status:
+    get:
+      summary: List generated accreditation directories
+      responses:
+        '200':
+          description: Directory listing
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accreditations:
+                    type: array
+                    items:
+                      type: string
+                  output_dir:
+                    type: string
+  '/artifacts/{artifactPath}':
+    get:
+      summary: Download generated artifact
+      parameters:
+        - in: path
+          name: artifactPath
+          required: true
+          schema:
+            type: string
+          description: Relative path to the artifact inside the exports/output directory.
+      responses:
+        '200':
+          description: Binary artifact download
+          content:
+            application/vnd.openxmlformats-officedocument.wordprocessingml.document:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Artifact not found
+components:
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required:
+        - error
+    FacultySummary:
+      type: object
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+          nullable: true
+        area:
+          type: string
+          nullable: true
+        unit:
+          type: string
+          nullable: true
+        allocation_count:
+          type: integer
+          minimum: 0
+        has_allocation:
+          type: boolean
+        has_photo:
+          type: boolean
+        accreditations:
+          type: array
+          items:
+            type: string
+      required:
+        - id
+        - name
+        - allocation_count
+        - has_allocation
+        - has_photo
+        - accreditations
+    FacultySummaryPage:
+      type: object
+      properties:
+        page:
+          type: integer
+        per_page:
+          type: integer
+        total:
+          type: integer
+        pages:
+          type: integer
+        result:
+          type: array
+          items:
+            $ref: '#/components/schemas/FacultySummary'
+      required:
+        - page
+        - per_page
+        - total
+        - pages
+        - result
+    FacultyProfile:
+      type: object
+      properties:
+        faculty:
+          type: object
+          description: Primary faculty information including personal, academic, and accreditation metadata.
+        photo:
+          type: object
+          properties:
+            available:
+              type: boolean
+            mime_type:
+              type: string
+              nullable: true
+            filename:
+              type: string
+              nullable: true
+            updated_at:
+              type: string
+              nullable: true
+            url:
+              type: string
+              nullable: true
+        education:
+          type: array
+          items:
+            type: object
+        experience:
+          type: array
+          items:
+            type: object
+        production:
+          type: array
+          items:
+            type: object
+      required:
+        - faculty
+        - photo
+        - education
+        - experience
+        - production
+    ExportRequest:
+      type: object
+      properties:
+        id:
+          type: string
+        faculty_id:
+          type: string
+        format:
+          type: string
+          enum: [docx, pdf]
+        include_photo:
+          type: boolean
+      description: Either id or faculty_id must be provided when calling /export without a path parameter.
+    ArtifactResponse:
+      type: object
+      properties:
+        faculty_id:
+          type: string
+        name:
+          type: string
+        docx_path:
+          type: string
+          nullable: true
+        docx_url:
+          type: string
+          nullable: true
+        pdf_path:
+          type: string
+          nullable: true
+        pdf_url:
+          type: string
+          nullable: true
+      required:
+        - faculty_id
+        - name
+    PhotoResponse:
+      type: object
+      properties:
+        faculty_id:
+          type: string
+        mime_type:
+          type: string
+        filename:
+          type: string
+        updated_at:
+          type: string
+        message:
+          type: string
+      required:
+        - faculty_id
+        - mime_type
+        - filename
+        - updated_at
+        - message
+    TableUploadResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        table:
+          type: string
+        rows:
+          type: integer
+        columns:
+          type: array
+          items:
+            type: string
+        source:
+          type: string
+      required:
+        - table
+        - rows
+        - columns
+        - source

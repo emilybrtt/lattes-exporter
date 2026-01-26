@@ -18,6 +18,7 @@ load_dotenv() # Carrega variáveis de ambiente
 
 
 def _engine():
+    """Cria o engine e garante que a pasta do SQLite exista quando necessário."""
     engine = database_engine()
     if engine.dialect.name == "sqlite":
         sqlite_path().parent.mkdir(parents=True, exist_ok=True)
@@ -116,7 +117,7 @@ _TABLE_BY_KEY, _TABLE_BY_ALIAS = _build_alias_lookup()
 
 
 def _resolve_table_spec(raw_key: str) -> dict:
-    """Resolves table metadata for uploads, accepting table or filename aliases."""
+    """Resolve a configuração da tabela a partir do nome ou de apelidos aceitos."""
     normalized = (raw_key or "").strip().lower().replace("-", "_")
     if not normalized:
         raise ValueError("Tabela não informada.")
@@ -128,7 +129,7 @@ def _resolve_table_spec(raw_key: str) -> dict:
 
 
 def _load_expected_columns(spec: dict) -> list[str]:
-    """Returns the sanitized column names expected for a table, from default CSV if available."""
+    """Carrega nomes de colunas esperados tomando o CSV/XLSX padrão como referência."""
     data_path = _resolve_dataset_file(spec)
     if data_path is None:
         return []
@@ -160,14 +161,14 @@ def _load_expected_columns(spec: dict) -> list[str]:
 
 
 def _prepare_rows(frame: pd.DataFrame) -> Iterable[tuple[str, ...]]:
-    """Converts a dataframe to a sequence of UTF-8 safe string tuples."""
+    """Converte um DataFrame em tuplas de strings seguras para armazenamento."""
     cleaned = frame.fillna("")
     for row in cleaned.itertuples(index=False, name=None):
         yield tuple("" if value is None else str(value) for value in row)
 
 
 def _read_csv_flexible(raw_bytes: bytes, skip_rows: int) -> pd.DataFrame:
-    """Attempts to parse CSV bytes handling common delimiters automatically."""
+    """Tenta interpretar um CSV detectando automaticamente delimitadores usuais."""
 
     def _try_read(**kwargs: object) -> pd.DataFrame:
         stream = BytesIO(raw_bytes)
@@ -219,6 +220,7 @@ def _quote_identifier(identifier: str) -> str:
 
 
 def _insert_rows(conn: Connection, table_name: str, columns: list[str], rows: list[tuple[str, ...]]) -> None:
+    """Executa inserções em lote preservando a ordem das colunas sanitizadas."""
     if not rows:
         return
     param_names = [f"p{index}" for index in range(len(columns))]
@@ -235,7 +237,7 @@ def _insert_rows(conn: Connection, table_name: str, columns: list[str], rows: li
 
 
 def reload_table_from_upload(table_key: str, file_bytes: bytes, *, filename: str) -> dict:
-    """Replaces one of the configured tables with data coming from CSV or XLSX uploads."""
+    """Substitui a tabela configurada pelos dados enviados em CSV ou XLSX."""
     if not file_bytes:
         raise ValueError("Arquivo vazio.")
 

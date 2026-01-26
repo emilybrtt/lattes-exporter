@@ -23,8 +23,14 @@ class AutomationFilteringTests(unittest.TestCase):
 
         self.reference_year = datetime.utcnow().year
         self.previous_env = os.environ.get("LATTES_SQLITE_PATH")
+        self.previous_database_url = os.environ.get("DATABASE_URL")
+        self.previous_service_uri = os.environ.get("SERVICE_URI")
         os.environ["LATTES_SQLITE_PATH"] = str(self.db_path)
+        os.environ["DATABASE_URL"] = f"sqlite:///{self.db_path.as_posix()}"
+        os.environ.pop("SERVICE_URI", None)
         config.sqlite_path.cache_clear()
+        config.database_url.cache_clear()
+        config.database_engine.cache_clear()
 
         self._seed_database()
         self.addCleanup(self._restore_environment)
@@ -34,7 +40,17 @@ class AutomationFilteringTests(unittest.TestCase):
             os.environ.pop("LATTES_SQLITE_PATH", None)
         else:
             os.environ["LATTES_SQLITE_PATH"] = self.previous_env
+        if self.previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = self.previous_database_url
+        if self.previous_service_uri is None:
+            os.environ.pop("SERVICE_URI", None)
+        else:
+            os.environ["SERVICE_URI"] = self.previous_service_uri
         config.sqlite_path.cache_clear()
+        config.database_url.cache_clear()
+        config.database_engine.cache_clear()
 
     def _seed_database(self) -> None:
         recent_experience_start = str(self.reference_year - 1)
@@ -303,10 +319,25 @@ class AutomationFilteringTests(unittest.TestCase):
             )
             conn.commit()
 
+            conn.execute(
+                """
+                CREATE TABLE faculty_photos (
+                    faculty_id TEXT PRIMARY KEY,
+                    image BLOB,
+                    mime_type TEXT,
+                    filename TEXT,
+                    updated_at TEXT
+                )
+                """
+            )
+            conn.execute(
+                "INSERT INTO faculty_photos (faculty_id, image, mime_type, filename, updated_at) VALUES (?, ?, ?, ?, ?)",
+                ("123", b"photo", "image/png", "photo.png", "2025-01-01T00:00:00Z"),
+            )
+
     def test_profile_filters_recent_items(self) -> None:
         automation = CVAutomation(output_root=self.output_dir)
-        with sqlite3.connect(self.db_path) as conn:
-            conn.row_factory = sqlite3.Row
+        with automation.engine.connect() as conn:
             profile = automation._build_profile(conn, "123")
 
         self.assertIsNotNone(profile)

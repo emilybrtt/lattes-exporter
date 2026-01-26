@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from backend.core import database
+from backend.core import config, database
 
 
 class ReloadTableUploadTests(unittest.TestCase):
@@ -25,41 +25,45 @@ class ReloadTableUploadTests(unittest.TestCase):
         }
 
         self.original_env = os.environ.get("LATTES_SQLITE_PATH")
+        self.previous_database_url = os.environ.get("DATABASE_URL")
+        self.previous_service_uri = os.environ.get("SERVICE_URI")
         self.original_csv_specs = database.CSV_SPECS
         self.original_data_dir = database.DATA_DIR
-        self.original_db_path = database.DB_PATH
         self.original_maps = (database._TABLE_BY_KEY, database._TABLE_BY_ALIAS)
-        self.original_connection = database.connection
-        self.original_cursor = database.cursor
 
         canonical = "ID,Name\n1,Alpha\n"
         canonical_path = self.base_path / self.sample_spec["filename"]
         canonical_path.write_text(canonical, encoding="utf-8")
 
         os.environ["LATTES_SQLITE_PATH"] = str(self.db_path)
+        os.environ["DATABASE_URL"] = f"sqlite:///{self.db_path.as_posix()}"
+        os.environ.pop("SERVICE_URI", None)
+        config.reset_database_caches()
         database.CSV_SPECS = [self.sample_spec]
         database.DATA_DIR = self.base_path
-        database.DB_PATH = self.db_path
         database._TABLE_BY_KEY, database._TABLE_BY_ALIAS = database._build_alias_lookup()
-
-        database.connection = None
-        database.cursor = None
 
     def tearDown(self) -> None:
         if self.original_env is None:
             os.environ.pop("LATTES_SQLITE_PATH", None)
         else:
             os.environ["LATTES_SQLITE_PATH"] = self.original_env
+        if self.previous_database_url is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = self.previous_database_url
+        if self.previous_service_uri is None:
+            os.environ.pop("SERVICE_URI", None)
+        else:
+            os.environ["SERVICE_URI"] = self.previous_service_uri
 
+        config.reset_database_caches()
         database.CSV_SPECS = self.original_csv_specs
         database.DATA_DIR = self.original_data_dir
-        database.DB_PATH = self.original_db_path
         database._TABLE_BY_KEY, database._TABLE_BY_ALIAS = self.original_maps
-        database.connection = self.original_connection
-        database.cursor = self.original_cursor
 
     def _fetch_rows(self) -> list[tuple[str, ...]]:
-        with sqlite3.connect(database.DB_PATH) as conn:
+        with sqlite3.connect(self.db_path) as conn:
             return list(
                 conn.execute(f'SELECT * FROM "{self.sample_spec["table"]}" ORDER BY rowid')
             )

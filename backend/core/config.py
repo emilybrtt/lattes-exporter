@@ -1,3 +1,5 @@
+"""Configuração centralizada de caminhos, variáveis de ambiente e engine SQLAlchemy."""
+
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -20,11 +22,13 @@ TEMPLATE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def env_str(name: str, default: str | None = None) -> str | None:
+	"""Obtém uma variável de ambiente como string, retornando o padrão quando ausente."""
 	return os.getenv(name, default)
 
 
 @lru_cache(maxsize=1)
 def sqlite_path() -> Path:
+	"""Resolve o caminho absoluto do banco SQLite, permitindo sobrescrita via variável."""
 	custom = env_str("LATTES_SQLITE_PATH")
 	if custom:
 		return Path(custom).expanduser().resolve()
@@ -32,6 +36,7 @@ def sqlite_path() -> Path:
 
 
 def _normalize_database_url(raw: str) -> str:
+	"""Garante que URLs Postgres utilizem o driver psycopg ao montar a string de conexão."""
 	value = raw.strip()
 	if value.startswith("postgresql+psycopg://"):
 		return value
@@ -44,6 +49,7 @@ def _normalize_database_url(raw: str) -> str:
 
 @lru_cache(maxsize=1)
 def database_url() -> str:
+	"""Retorna a URL de conexão ativa, priorizando variáveis e caindo para SQLite."""
 	override = env_str("DATABASE_URL") or env_str("SERVICE_URI")
 	if override:
 		return _normalize_database_url(override)
@@ -53,6 +59,7 @@ def database_url() -> str:
 
 @lru_cache(maxsize=1)
 def database_engine() -> Engine:
+	"""Instancia o engine SQLAlchemy compartilhado com parâmetros seguros para SQLite."""
 	url = database_url()
 	connect_args: dict[str, object] = {}
 	if url.startswith("sqlite:"):
@@ -61,6 +68,7 @@ def database_engine() -> Engine:
 
 
 def reset_database_caches() -> None:
+	"""Limpa caches para forçar a reavaliação de caminhos e engine em tempo de execução."""
 	sqlite_path.cache_clear()
 	database_url.cache_clear()
 	database_engine.cache_clear()
