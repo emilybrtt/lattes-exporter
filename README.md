@@ -1,4 +1,4 @@
-# Lattes Exporter
+# CV Exporter
 
 Pipeline completo para gerar currículos DOCX, PDF e JSON a partir de dados consolidados do corpo docente. O repositório combina backend Flask/SQLAlchemy e frontend React Router para acelerar a atualização de datasets e a exportação em lote.
 

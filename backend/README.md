@@ -1,5 +1,4 @@
-# Backend – Lattes Exporter
-
+# Backend – CV Exporter
 Serviço Flask responsável por ingerir datasets do Lattes, persistir dados via SQLAlchemy (SQLite por padrão) e gerar artefatos DOCX, PDF e JSON para cada docente.
 
 ---

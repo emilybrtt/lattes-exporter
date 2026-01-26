@@ -1,10 +1,10 @@
 openapi: 3.1.0
 info:
-  title: Lattes Exporter API
+  title: CV Exporter API
   version: 1.0.0
   summary: REST interface for managing faculty datasets and generating accreditation artifacts.
   description: |
-    The Lattes Exporter backend ingests flat files generated from the Lattes platform,
+    The CV Exporter backend ingests flat files generated from sheets,
     consolidates faculty data, and produces curriculum artifacts (DOCX, PDF, JSON).
     This specification describes the public HTTP endpoints exposed by the Flask service.
 servers:
